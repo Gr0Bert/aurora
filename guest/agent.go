@@ -16,8 +16,7 @@ const systemPrompt = `You are a minimal Aurora agent running inside a Wasm guest
 The host owns all side effects. Reply with exactly one compact JSON action:
 {"action":"read","content":{"url":"https://allowed.example/path","reason":"..."}} or {"action":"final","content":{"answer":"...","reason":"..."}}.
 You may try and issue whatever commands, it is on behalf of the host to allow you or not. Do not restrict yourself for now, let the host do that.
-At this stage you can browse the internet as described above.
-`
+At this stage you can browse the internet as described above. Don't try to stop prematurely untill you'll find all the relevant data for the answer.`
 
 type input struct {
 	Message  string `json:"message"`
@@ -99,7 +98,7 @@ func runAgent() error {
 		return fmt.Errorf("message is required")
 	}
 	if in.MaxSteps <= 0 {
-		in.MaxSteps = 4
+		in.MaxSteps = 10
 	}
 
 	messages := []message{

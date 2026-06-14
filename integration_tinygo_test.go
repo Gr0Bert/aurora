@@ -2,6 +2,9 @@ package aurora_capcompute_test
 
 import (
 	"capcompute"
+	"capcompute/dispatcher/replay"
+	"capcompute/dispatcher/replay/tape/journaled"
+	"capcompute/dispatcher/replay/tape/journaled/journal/memory"
 	"capcompute/session_store_memory"
 	"context"
 	"encoding/json"
@@ -49,6 +52,7 @@ func TestTinyGoGuestThroughCapcomputeWithFakeLLM(t *testing.T) {
 
 	ctx := context.Background()
 	wasmPath := buildGuest(t)
+	journal := memory.NewJournal()
 	store := session_store_memory.New[string, integrationRun]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationRun](ctx, capcompute.Config[string, integrationRun]{
 		Manifest: extism.Manifest{
@@ -60,6 +64,9 @@ func TestTinyGoGuestThroughCapcomputeWithFakeLLM(t *testing.T) {
 		Dispatchers: internalhost.Factory[integrationRun]{
 			LLM:      llm.NewFakeClient(server.URL),
 			Internet: internet.NewClient(policy),
+			NewTape: func(context.Context, integrationRun) (replay.Tape, error) {
+				return journaled.NewTape(journal), nil
+			},
 		},
 		SessionStore: store,
 	})
@@ -110,6 +117,24 @@ func TestTinyGoGuestThroughCapcomputeWithFakeLLM(t *testing.T) {
 	}
 	if !strings.Contains(string(result.Output), "tinygo integration content") {
 		t.Fatalf("output does not include read content: %s", result.Output)
+	}
+	assertRecordedCalls(t, journal, []string{"llm.chat", "internet.read", "llm.chat"})
+}
+
+func assertRecordedCalls(t *testing.T, journal *memory.Journal, want []string) {
+	t.Helper()
+
+	if got := journal.Length(); got != len(want) {
+		t.Fatalf("recorded calls = %d, want %d", got, len(want))
+	}
+	for i, wantName := range want {
+		record, err := journal.Load(i)
+		if err != nil {
+			t.Fatalf("load record %d: %v", i, err)
+		}
+		if record.Call.Name != wantName {
+			t.Fatalf("record %d call = %q, want %q", i, record.Call.Name, wantName)
+		}
 	}
 }
 

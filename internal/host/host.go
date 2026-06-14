@@ -8,6 +8,7 @@ import (
 	"aurora-capcompute/internal/internet"
 	"aurora-capcompute/internal/llm"
 	"capcompute/dispatcher"
+	"capcompute/dispatcher/replay"
 )
 
 type InternetReader interface {
@@ -17,13 +18,24 @@ type InternetReader interface {
 type Factory[K any] struct {
 	LLM      llm.Client
 	Internet InternetReader
+	NewTape  TapeFactory[K]
 }
 
-func (f Factory[K]) NewDispatcher(context.Context, K) (dispatcher.Dispatcher[K], error) {
-	return &Dispatcher[K]{
+type TapeFactory[K any] func(ctx context.Context, key K) (replay.Tape, error)
+
+func (f Factory[K]) NewDispatcher(ctx context.Context, key K) (dispatcher.Dispatcher[K], error) {
+	next := &Dispatcher[K]{
 		LLM:      f.LLM,
 		Internet: f.Internet,
-	}, nil
+	}
+	if f.NewTape == nil {
+		return next, nil
+	}
+	tape, err := f.NewTape(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	return replay.NewDispatcher[K](tape, next), nil
 }
 
 type Dispatcher[K any] struct {

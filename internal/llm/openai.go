@@ -16,7 +16,7 @@ import (
 
 const (
 	DefaultOpenAIBaseURL = "https://api.openai.com/v1"
-	DefaultOpenAIModel   = "gpt-5.4-mini"
+	DefaultOpenAIModel   = "gpt-5.4"
 )
 
 // OpenAIConfig configures an OpenAI-compatible Chat Completions client.
