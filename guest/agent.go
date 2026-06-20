@@ -74,6 +74,7 @@ type finalAction struct {
 type toolObservation struct {
 	Action  string          `json:"action"`
 	Status  string          `json:"status"`
+	Args    json.RawMessage `json:"args,omitempty"`
 	Content json.RawMessage `json:"content,omitempty"`
 	Error   string          `json:"error,omitempty"`
 }
@@ -187,6 +188,7 @@ func runAgent() error {
 			observation := toolObservation{
 				Action: envelope.Action,
 				Status: response.Status,
+				Args:   envelope.Content,
 			}
 			if response.Status == "failed" {
 				observation.Error = response.Message
