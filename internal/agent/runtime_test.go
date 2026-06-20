@@ -99,6 +99,34 @@ func TestRuntimeCarriesOnlyCompactCompletedHistory(t *testing.T) {
 	}
 }
 
+func TestThreadTitleUsesFirstMessagePreview(t *testing.T) {
+	model := &finalLLM{}
+	runtime := newTestRuntime(t, model)
+	thread, err := runtime.CreateThread()
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	if thread.Title != "New thread" {
+		t.Fatalf("initial title = %q, want New thread", thread.Title)
+	}
+
+	message := strings.Repeat("界", 61)
+	run, err := runtime.CreateRun(thread.ID, "  "+message+"  ")
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	waitForStatus(t, runtime, run.ID, RunCompleted)
+
+	updated, err := runtime.GetThread(thread.ID)
+	if err != nil {
+		t.Fatalf("get thread: %v", err)
+	}
+	want := strings.Repeat("界", 60) + "…"
+	if updated.Title != want {
+		t.Fatalf("title = %q, want %q", updated.Title, want)
+	}
+}
+
 type stopThenFinishLLM struct {
 	calls   atomic.Int32
 	started chan struct{}

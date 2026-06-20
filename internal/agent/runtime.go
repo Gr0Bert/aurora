@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,6 +86,7 @@ type Runtime struct {
 
 type threadState struct {
 	id          string
+	title       string
 	createdAt   time.Time
 	updatedAt   time.Time
 	history     []HistoryMessage
@@ -124,6 +126,7 @@ type agentOutput struct {
 
 type ThreadSummary struct {
 	ID          string    `json:"id"`
+	Title       string    `json:"title"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 	RunCount    int       `json:"run_count"`
@@ -236,7 +239,7 @@ func (r *Runtime) CreateThread() (ThreadSnapshot, error) {
 		return ThreadSnapshot{}, err
 	}
 	now := r.now().UTC()
-	thread := &threadState{id: id, createdAt: now, updatedAt: now}
+	thread := &threadState{id: id, title: "New thread", createdAt: now, updatedAt: now}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -304,6 +307,9 @@ func (r *Runtime) CreateRun(threadID string, message string) (RunSnapshot, error
 	run.journal = r.newJournal(run)
 	r.runs[runID] = run
 	thread.runIDs = append(thread.runIDs, runID)
+	if len(thread.runIDs) == 1 {
+		thread.title = threadTitle(message)
+	}
 	thread.activeRunID = runID
 	thread.updatedAt = now
 	snapshot := r.runSnapshotLocked(run)
@@ -691,11 +697,25 @@ func (r *Runtime) publish(threadID string, event Event) {
 func (r *Runtime) threadSummaryLocked(thread *threadState) ThreadSummary {
 	return ThreadSummary{
 		ID:          thread.id,
+		Title:       thread.title,
 		CreatedAt:   thread.createdAt,
 		UpdatedAt:   thread.updatedAt,
 		RunCount:    len(thread.runIDs),
 		ActiveRunID: thread.activeRunID,
 	}
+}
+
+func threadTitle(message string) string {
+	fields := strings.Fields(message)
+	if len(fields) == 0 {
+		return "New thread"
+	}
+	title := strings.Join(fields, " ")
+	runes := []rune(title)
+	if len(runes) <= 60 {
+		return title
+	}
+	return string(runes[:60]) + "…"
 }
 
 func (r *Runtime) threadSnapshotLocked(thread *threadState) ThreadSnapshot {

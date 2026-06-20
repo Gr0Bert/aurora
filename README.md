@@ -97,6 +97,10 @@ or stopped.
 The server has no authentication or CORS policy. It stores everything in memory,
 so all state disappears when the process exits.
 
+For the standalone debug interface, run the sibling `aurora-ui` project. Its
+dependency-free Node server serves the browser files and proxies `/v1` to this
+server, avoiding any CORS requirement.
+
 ## Runtime Configuration
 
 - `AURORA_LLM=fake|openai`, default `fake`.
