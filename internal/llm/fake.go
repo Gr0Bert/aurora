@@ -47,22 +47,22 @@ func (c *FakeClient) ChatWithMessages(messages []Message) (ChatResponse, error) 
 		}
 	}
 	if observation == "" {
-		return marshalAction(actionEnvelope[fakeReadAction]{
+		return marshalActions([]actionEnvelope[fakeReadAction]{{
 			Action: "read",
 			Content: fakeReadAction{
 				URL:    c.readURL(),
 				Reason: "fake client reads the configured URL",
 			},
-		})
+		}})
 	}
 
-	return marshalAction(actionEnvelope[fakeFinalAction]{
+	return marshalActions([]actionEnvelope[fakeFinalAction]{{
 		Action: "final",
 		Content: fakeFinalAction{
 			Answer: "Read result: " + compactObservation(observation),
 			Reason: "fake client observed a read result",
 		},
-	})
+	}})
 }
 
 func (c *FakeClient) readURL() string {
@@ -72,7 +72,7 @@ func (c *FakeClient) readURL() string {
 	return c.ReadURL
 }
 
-func marshalAction(v any) (ChatResponse, error) {
+func marshalActions(v any) (ChatResponse, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return ChatResponse{}, err

@@ -4,7 +4,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"strings"
 
 	"github.com/extism/go-pdk"
 )
@@ -13,14 +16,17 @@ import (
 func hostPlay(uint64) uint64
 
 const systemPrompt = `You are a minimal Aurora agent running inside a Wasm guest.
-The host owns all side effects. Reply with exactly one compact JSON action:
-{"action":"read","content":{"url":"https://allowed.example/path","reason":"..."}} or {"action":"final","content":{"answer":"...","reason":"..."}}.
+The host owns all side effects. Reply with exactly one compact JSON array of actions.
+You may request multiple independent reads in one turn:
+[{"action":"read","content":{"url":"https://allowed.example/one","reason":"..."}},{"action":"read","content":{"url":"https://allowed.example/two","reason":"..."}}]
+After the host returns one aggregated observation array, either request more reads or reply with exactly one final action:
+[{"action":"final","content":{"answer":"...","reason":"..."}}]
+Never combine a final action with read actions in the same array.
 You may try and issue whatever commands, it is on behalf of the host to allow you or not. Do not restrict yourself for now, let the host do that.
 At this stage you can browse the internet as described above. Don't try to stop prematurely untill you'll find all the relevant data for the answer.`
 
 type input struct {
-	Message  string `json:"message"`
-	MaxSteps int    `json:"max_steps"`
+	Message string `json:"message"`
 }
 
 type message struct {
@@ -42,6 +48,11 @@ type modelEnvelope struct {
 	Content json.RawMessage `json:"content"`
 }
 
+type modelDiagnostic struct {
+	Error   string `json:"error"`
+	Message string `json:"message"`
+}
+
 type readAction struct {
 	URL    string `json:"url"`
 	Reason string `json:"reason,omitempty"`
@@ -50,6 +61,11 @@ type readAction struct {
 type finalAction struct {
 	Answer string `json:"answer"`
 	Reason string `json:"reason,omitempty"`
+}
+
+type toolObservation struct {
+	Action  string          `json:"action"`
+	Content json.RawMessage `json:"content"`
 }
 
 type internetReadRequest struct {
@@ -80,9 +96,17 @@ type hostResponse struct {
 	Message string          `json:"message,omitempty"`
 }
 
+var errYielded = errors.New("host yielded")
+
 //go:wasmexport run
 func run() int32 {
-	if err := runAgent(); err != nil {
+	if err := runAgent(); errors.Is(err, errYielded) {
+		if outputErr := pdk.OutputJSON(output{Status: "yielded"}); outputErr != nil {
+			pdk.SetError(outputErr)
+			return 1
+		}
+		return 0
+	} else if err != nil {
 		pdk.SetError(err)
 		return 1
 	}
@@ -97,60 +121,153 @@ func runAgent() error {
 	if in.Message == "" {
 		return fmt.Errorf("message is required")
 	}
-	if in.MaxSteps <= 0 {
-		in.MaxSteps = 10
-	}
 
 	messages := []message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: in.Message},
 	}
 
-	for i := 0; i < in.MaxSteps; i++ {
+	for {
 		chat, err := llmChat(messages)
 		if err != nil {
 			return err
 		}
-		var envelope modelEnvelope
-		if err := json.Unmarshal([]byte(chat.Content), &envelope); err != nil {
+		envelopes, err := decodeModelEnvelopes(chat.Content)
+		if err != nil {
 			return fmt.Errorf("invalid model JSON: %w", err)
 		}
+		if len(envelopes) == 1 && envelopes[0].Action == "final" {
+			return outputFinal(envelopes[0])
+		}
 
-		switch envelope.Action {
-		case "read":
+		messages = append(messages, message{Role: "assistant", Content: chat.Content})
+		observations := make([]toolObservation, 0, len(envelopes))
+		for i, envelope := range envelopes {
+			if envelope.Action != "read" {
+				return fmt.Errorf("action %d must be read in a multi-action batch, got %q", i, envelope.Action)
+			}
 			var action readAction
 			if err := decodeActionContent(envelope.Content, &action); err != nil {
-				return fmt.Errorf("invalid read action: %w", err)
+				return fmt.Errorf("invalid read action %d: %w", i, err)
 			}
 			if action.URL == "" {
-				return fmt.Errorf("read action missing url")
+				return fmt.Errorf("read action %d missing url", i)
 			}
-			messages = append(messages, message{Role: "assistant", Content: chat.Content})
-			observation, rawObservation, err := internetRead(action.URL)
+			_, rawObservation, err := internetRead(action.URL)
 			if err != nil {
-				return err
+				return fmt.Errorf("execute read action %d: %w", i, err)
 			}
-			_ = observation
-			messages = append(messages, message{Role: "tool", Content: string(rawObservation)})
-
-		case "final":
-			var action finalAction
-			if err := decodeActionContent(envelope.Content, &action); err != nil {
-				return fmt.Errorf("invalid final action: %w", err)
-			}
-			if action.Answer == "" {
-				return fmt.Errorf("final action missing answer")
-			}
-			return pdk.OutputJSON(output{
-				Status: "completed",
-				Answer: action.Answer,
+			observations = append(observations, toolObservation{
+				Action:  "read",
+				Content: rawObservation,
 			})
+		}
+		rawObservations, err := json.Marshal(observations)
+		if err != nil {
+			return fmt.Errorf("encode tool observations: %w", err)
+		}
+		messages = append(messages, message{Role: "tool", Content: string(rawObservations)})
+	}
+}
 
+func decodeModelEnvelopes(content string) ([]modelEnvelope, error) {
+	return decodeModelEnvelopeStream(content, 0)
+}
+
+func decodeModelEnvelopeStream(content string, depth int) ([]modelEnvelope, error) {
+	if depth > 1 {
+		return nil, fmt.Errorf("nested encoded model JSON is not supported")
+	}
+
+	decoder := json.NewDecoder(strings.NewReader(content))
+	var envelopes []modelEnvelope
+	for {
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			return nil, err
+		}
+
+		trimmed := strings.TrimSpace(string(value))
+		if trimmed == "" {
+			continue
+		}
+		switch trimmed[0] {
+		case '[':
+			var batch []json.RawMessage
+			if err := json.Unmarshal(value, &batch); err != nil {
+				return nil, err
+			}
+			for _, item := range batch {
+				envelope, ok, err := decodeModelEnvelopeObject(item)
+				if err != nil {
+					return nil, err
+				}
+				if ok {
+					envelopes = append(envelopes, envelope)
+				}
+			}
+		case '{':
+			envelope, ok, err := decodeModelEnvelopeObject(value)
+			if err != nil {
+				return nil, err
+			}
+			if ok {
+				envelopes = append(envelopes, envelope)
+			}
+		case '"':
+			var encoded string
+			if err := json.Unmarshal(value, &encoded); err != nil {
+				return nil, err
+			}
+			nested, err := decodeModelEnvelopeStream(encoded, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			envelopes = append(envelopes, nested...)
 		default:
-			return fmt.Errorf("unsupported action: %s", envelope.Action)
+			return nil, fmt.Errorf("expected action object or array")
 		}
 	}
-	return fmt.Errorf("max steps exceeded")
+	if len(envelopes) == 0 {
+		return nil, fmt.Errorf("model action batch is empty")
+	}
+	return envelopes, nil
+}
+
+func decodeModelEnvelopeObject(raw json.RawMessage) (modelEnvelope, bool, error) {
+	var diagnostic modelDiagnostic
+	if err := json.Unmarshal(raw, &diagnostic); err != nil {
+		return modelEnvelope{}, false, err
+	}
+	if diagnostic.Error != "" {
+		return modelEnvelope{}, false, nil
+	}
+
+	var envelope modelEnvelope
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		return modelEnvelope{}, false, err
+	}
+	if envelope.Action == "" {
+		return modelEnvelope{}, false, fmt.Errorf("action is required")
+	}
+	return envelope, true, nil
+}
+
+func outputFinal(envelope modelEnvelope) error {
+	var action finalAction
+	if err := decodeActionContent(envelope.Content, &action); err != nil {
+		return fmt.Errorf("invalid final action: %w", err)
+	}
+	if action.Answer == "" {
+		return fmt.Errorf("final action missing answer")
+	}
+	return pdk.OutputJSON(output{
+		Status: "completed",
+		Answer: action.Answer,
+	})
 }
 
 func decodeActionContent(content json.RawMessage, target any) error {
@@ -212,6 +329,8 @@ func dispatch(c call) (hostResponse, error) {
 	switch response.Status {
 	case "result":
 		return response, nil
+	case "yield":
+		return hostResponse{}, errYielded
 	case "failed":
 		return hostResponse{}, fmt.Errorf("host failure: %s", response.Message)
 	default:

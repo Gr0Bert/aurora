@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +31,7 @@ func (r Run) SessionKey() string {
 }
 
 type agentInput struct {
-	Message  string `json:"message"`
-	MaxSteps int    `json:"max_steps"`
+	Message string `json:"message"`
 }
 
 type executeResult struct {
@@ -42,15 +40,22 @@ type executeResult struct {
 }
 
 type journalEntry struct {
-	Call    dispatcher.Call `json:"call"`
-	Outcome journalOutcome  `json:"outcome"`
+	Call    journalCall    `json:"call"`
+	Outcome journalOutcome `json:"outcome"`
+}
+
+type journalCall struct {
+	Name string `json:"name"`
+	Args any    `json:"args,omitempty"`
 }
 
 type journalOutcome struct {
 	Status  dispatcher.OutcomeKind `json:"status"`
-	Result  json.RawMessage        `json:"result,omitempty"`
+	Result  any                    `json:"result,omitempty"`
 	Message string                 `json:"message,omitempty"`
 }
+
+const journalStringLimit = 500
 
 func main() {
 	result, err := execute(context.Background(), os.Args[1:])
@@ -65,9 +70,6 @@ func main() {
 }
 
 func execute(ctx context.Context, args []string) (executeResult, error) {
-	ctx, cancel := context.WithTimeout(ctx, envDuration("AURORA_TIMEOUT", 2*time.Minute))
-	defer cancel()
-
 	llmClient, err := llmFromEnv()
 	if err != nil {
 		return executeResult{}, err
@@ -103,8 +105,7 @@ func execute(ctx context.Context, args []string) (executeResult, error) {
 
 	run := Run{ID: envDefault("AURORA_RUN_ID", fmt.Sprintf("run-%d", time.Now().UnixNano()))}
 	input, err := json.Marshal(agentInput{
-		Message:  messageFromArgs(args),
-		MaxSteps: envInt("AURORA_MAX_STEPS", 4),
+		Message: messageFromArgs(args),
 	})
 	if err != nil {
 		return executeResult{}, fmt.Errorf("encode input: %w", err)
@@ -123,11 +124,11 @@ func execute(ctx context.Context, args []string) (executeResult, error) {
 		return executeResult{}, fmt.Errorf("save session: %w", err)
 	}
 
-	results, err := compute.Play(ctx, session)
+	handle, err := compute.Play(ctx, session)
 	if err != nil {
 		return executeResult{}, fmt.Errorf("play: %w", err)
 	}
-	result := <-results
+	result := <-handle.Results()
 	if result.Status != capcompute.PlayCompleted {
 		if result.Err != nil {
 			return executeResult{}, fmt.Errorf("play %s: %w", result.Status, result.Err)
@@ -152,16 +153,65 @@ func collectJournalEntries(journal *memory.Journal) ([]journalEntry, error) {
 		if err != nil {
 			return nil, fmt.Errorf("load journal record %d: %w", i, err)
 		}
+		args, err := journalJSON(record.Call.Args)
+		if err != nil {
+			return nil, fmt.Errorf("format journal record %d args: %w", i, err)
+		}
+		result, err := journalResult(record.Outcome.Result())
+		if err != nil {
+			return nil, fmt.Errorf("format journal record %d result: %w", i, err)
+		}
 		entries = append(entries, journalEntry{
-			Call: record.Call,
+			Call: journalCall{
+				Name: record.Call.Name,
+				Args: args,
+			},
 			Outcome: journalOutcome{
 				Status:  record.Outcome.Kind(),
-				Result:  record.Outcome.Result(),
+				Result:  result,
 				Message: record.Outcome.Message(),
 			},
 		})
 	}
 	return entries, nil
+}
+
+func journalResult(raw json.RawMessage) (any, error) {
+	return journalJSON(raw)
+}
+
+func journalJSON(raw json.RawMessage) (any, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	return truncateJournalStrings(value), nil
+}
+
+func truncateJournalStrings(value any) any {
+	switch value := value.(type) {
+	case string:
+		runes := []rune(value)
+		if len(runes) <= journalStringLimit {
+			return value
+		}
+		return string(runes[:journalStringLimit]) + "[...]"
+	case []any:
+		for i := range value {
+			value[i] = truncateJournalStrings(value[i])
+		}
+		return value
+	case map[string]any:
+		for key, item := range value {
+			value[key] = truncateJournalStrings(item)
+		}
+		return value
+	default:
+		return value
+	}
 }
 
 func llmFromEnv() (llm.Client, error) {
@@ -202,32 +252,4 @@ func envDefault(name string, fallback string) string {
 		return value
 	}
 	return fallback
-}
-
-func envInt(name string, fallback int) int {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func envDuration(name string, fallback time.Duration) time.Duration {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := time.ParseDuration(value)
-	if err == nil {
-		return parsed
-	}
-	seconds, err := strconv.Atoi(value)
-	if err != nil {
-		return fallback
-	}
-	return time.Duration(seconds) * time.Second
 }

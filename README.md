@@ -8,6 +8,12 @@ The TinyGo guest owns the agent loop and calls only `extism:host/compute/play`.
 The Go host owns all side effects: `llm.chat` and `internet.read`. The guest does
 not use Extism built-in HTTP or Extism network policy.
 
+Each model turn returns a JSON action array. The guest executes batched
+`internet.read` actions sequentially and sends their results back as one
+aggregated observation array before asking the model for its next action batch.
+For compatibility with imperfect model output, the guest also accepts
+whitespace-delimited action objects and a JSON string containing either form.
+
 ## Layout
 
 - `cmd/aurora-agent`: runnable host.
@@ -31,7 +37,10 @@ AURORA_LLM=fake AURORA_HTTP_ALLOW=GET:https://example.com go run ./cmd/aurora-ag
 - `AURORA_HTTP_ALLOW`, for example `GET:https://example.com,GET:https://docs.example.org`.
 - `AURORA_GUEST_WASM`, default `guest/agent.wasm`.
 - `AURORA_MESSAGE`, or pass the message as CLI arguments.
-- `AURORA_MAX_STEPS`, default `4`.
+
+The guest has no step limit. The host controls execution through the
+`capcompute.PlayHandle`: `Stop` forcefully terminates the current Wasm instance,
+while a host `yield` outcome leaves the session available for replay.
 
 OpenAI-compatible mode uses Chat Completions:
 
