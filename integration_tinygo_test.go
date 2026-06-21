@@ -1,12 +1,11 @@
 package aurora_capcompute_test
 
 import (
+	"aurora-stores/memory"
 	"capcompute"
 	"capcompute/dispatcher"
 	"capcompute/dispatcher/replay"
 	"capcompute/dispatcher/replay/tape/journaled"
-	"capcompute/dispatcher/replay/tape/journaled/journal/memory"
-	"capcompute/session_store_memory"
 	"context"
 	"encoding/json"
 	"errors"
@@ -183,7 +182,7 @@ func TestTinyGoGuestThroughCapcomputeWithFakeLLM(t *testing.T) {
 	ctx := context.Background()
 	wasmPath := buildGuest(t)
 	journal := memory.NewJournal()
-	store := session_store_memory.New[string, integrationRun]()
+	store := memory.NewSessionStore[string, integrationRun]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationRun](ctx, capcompute.Config[string, integrationRun]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
@@ -280,7 +279,7 @@ func TestTinyGoGuestExecutesAndAggregatesActionBatch(t *testing.T) {
 	ctx := context.Background()
 	journal := memory.NewJournal()
 	model := &batchLLM{urls: []string{server.URL + "/first", server.URL + "/second"}}
-	store := session_store_memory.New[string, integrationRun]()
+	store := memory.NewSessionStore[string, integrationRun]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationRun](ctx, capcompute.Config[string, integrationRun]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: buildGuest(t)}},
@@ -350,7 +349,7 @@ func TestTinyGoGuestReturnsCapabilityFailureToModel(t *testing.T) {
 	ctx := context.Background()
 	journal := memory.NewJournal()
 	model := &failureAwareLLM{}
-	store := session_store_memory.New[string, integrationRun]()
+	store := memory.NewSessionStore[string, integrationRun]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationRun](ctx, capcompute.Config[string, integrationRun]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: buildGuest(t)}},
@@ -469,7 +468,7 @@ func TestForceStopCanRecoverThroughRecreatedSessionAndJournal(t *testing.T) {
 	journal := memory.NewJournal()
 	reader := &interruptibleReader{started: make(chan struct{})}
 	model := &countingLLM{next: llm.NewFakeClient("https://example.com")}
-	store := session_store_memory.New[string, integrationRun]()
+	store := memory.NewSessionStore[string, integrationRun]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationRun](ctx, capcompute.Config[string, integrationRun]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},
@@ -620,7 +619,7 @@ func TestHostYieldKeepsAuroraSessionReplayable(t *testing.T) {
 		llm:      llm.NewFakeClient(server.URL),
 		internet: internet.NewClient(policy),
 	}
-	store := session_store_memory.New[string, integrationRun]()
+	store := memory.NewSessionStore[string, integrationRun]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, integrationRun](ctx, capcompute.Config[string, integrationRun]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: buildGuest(t)}},

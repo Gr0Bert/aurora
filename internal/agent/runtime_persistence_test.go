@@ -2,9 +2,9 @@ package agent_test
 
 import (
 	"aurora-capcompute/internal/agent"
-	aurorasqlite "aurora-capcompute/internal/storage/sqlite"
 	"aurora-capcompute/internal/task"
 	"aurora-dispatchers/llm"
+	aurorasqlite "aurora-stores/sqlite"
 	"context"
 	"encoding/json"
 	"net/http"

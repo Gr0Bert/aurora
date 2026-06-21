@@ -4,7 +4,6 @@ import (
 	"capcompute"
 	"capcompute/dispatcher"
 	"capcompute/dispatcher/replay/tape/journaled"
-	"capcompute/session_store_memory"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -22,6 +21,7 @@ import (
 	"aurora-dispatchers/llm"
 	"aurora-dispatchers/mcp"
 	dispatcherregistry "aurora-dispatchers/registry"
+
 	extism "github.com/extism/go-sdk"
 )
 
@@ -80,7 +80,7 @@ type Runtime struct {
 	mu           sync.Mutex
 	computes     map[string]*capcompute.ComputeCompiledPlugin[string, RunKey]
 	brains       *BrainRegistry
-	sessionStore *session_store_memory.Store[string, RunKey]
+	sessionStore capcompute.SessionStore[string, RunKey]
 	persistence  Store
 	tenantID     string
 	threads      map[string]*threadState
@@ -235,7 +235,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	runtime := &Runtime{
 		computes:     make(map[string]*capcompute.ComputeCompiledPlugin[string, RunKey]),
 		brains:       brains,
-		sessionStore: session_store_memory.New[string, RunKey](),
+		sessionStore: newInMemorySessionStore[string, RunKey](),
 		persistence:  config.Store,
 		tenantID:     strings.TrimSpace(config.TenantID),
 		threads:      make(map[string]*threadState),

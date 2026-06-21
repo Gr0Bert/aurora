@@ -26,6 +26,11 @@ dist/
 coverage.out
 *.test
 
+# SQLite databases
+*.db
+*.db-shm
+*.db-wal
+
 # TinyGo/Wasm build artifacts
 *.wasm
 *.wat

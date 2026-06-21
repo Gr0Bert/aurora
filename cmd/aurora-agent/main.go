@@ -1,13 +1,12 @@
 package main
 
 import (
+	"aurora-stores/memory"
 	"bytes"
 	"capcompute"
 	"capcompute/dispatcher"
 	"capcompute/dispatcher/replay"
 	"capcompute/dispatcher/replay/tape/journaled"
-	"capcompute/dispatcher/replay/tape/journaled/journal/memory"
-	"capcompute/session_store_memory"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -87,7 +86,7 @@ func execute(ctx context.Context, args []string) (executeResult, error) {
 
 	wasmPath := envDefault("AURORA_GUEST_WASM", "../aurora-brains/agent/agent.wasm")
 	journal := memory.NewJournal()
-	store := session_store_memory.New[string, Run]()
+	store := memory.NewSessionStore[string, Run]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, Run](ctx, capcompute.Config[string, Run]{
 		Manifest: extism.Manifest{
 			Wasm: []extism.Wasm{extism.WasmFile{Path: wasmPath}},

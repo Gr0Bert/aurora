@@ -3,10 +3,10 @@ package task_test
 import (
 	"aurora-capcompute/internal/agent"
 	"aurora-capcompute/internal/task"
+	"aurora-stores/memory"
 	"capcompute/dispatcher"
 	"capcompute/dispatcher/replay"
 	"capcompute/dispatcher/replay/tape/journaled"
-	"capcompute/dispatcher/replay/tape/journaled/journal/memory"
 	"context"
 	"crypto/sha256"
 	"encoding/json"

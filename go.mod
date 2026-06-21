@@ -4,9 +4,9 @@ go 1.26
 
 require (
 	aurora-dispatchers v0.0.0
+	aurora-stores v0.0.0
 	capcompute v0.0.0
 	github.com/extism/go-sdk v1.7.1
-	github.com/mattn/go-sqlite3 v1.14.46
 )
 
 require (
@@ -14,6 +14,7 @@ require (
 	github.com/extism/go-pdk v1.1.3 // indirect
 	github.com/gobwas/glob v0.2.3 // indirect
 	github.com/ianlancetaylor/demangle v0.0.0-20240805132620-81f5be970eca // indirect
+	github.com/mattn/go-sqlite3 v1.14.46 // indirect
 	github.com/tetratelabs/wabin v0.0.0-20230304001439-f6f874872834 // indirect
 	github.com/tetratelabs/wazero v1.9.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.3.1 // indirect
@@ -23,3 +24,5 @@ require (
 replace capcompute => ../capcompute
 
 replace aurora-dispatchers => ../aurora-dispatchers
+
+replace aurora-stores => ../aurora-stores
