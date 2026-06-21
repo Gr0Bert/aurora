@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,8 +16,9 @@ import (
 	"testing"
 	"time"
 
-	"aurora-capcompute/internal/internet"
-	"aurora-capcompute/internal/llm"
+	"aurora-capcompute/internal/task"
+	"aurora-dispatchers/internet"
+	"aurora-dispatchers/llm"
 )
 
 type finalLLM struct {
@@ -153,6 +156,9 @@ func TestRunSnapshotsEffectiveManifest(t *testing.T) {
 	if completed.EffectiveManifest.SystemPrompt != "thread prompt" {
 		t.Fatalf("system prompt = %q", completed.EffectiveManifest.SystemPrompt)
 	}
+	if completed.EffectiveManifest.Brain != DefaultBrainID || completed.BrainDigest == "" {
+		t.Fatalf("brain snapshot = %q digest=%q", completed.EffectiveManifest.Brain, completed.BrainDigest)
+	}
 	if !strings.Contains(string(completed.EffectiveManifest.Capabilities[0].Settings), `"*"`) {
 		t.Fatalf("effective settings = %s", completed.EffectiveManifest.Capabilities[0].Settings)
 	}
@@ -211,6 +217,59 @@ func TestRuntimeGeneratesFinalOnlyProtocolWithoutCapabilities(t *testing.T) {
 	if !strings.Contains(prompt, "Answer concisely.") ||
 		!strings.Contains(prompt, "Available tools for this run:\nNone.") {
 		t.Fatalf("generated final-only prompt = %q", prompt)
+	}
+}
+
+func TestRuntimeResumesApprovedWebhookTask(t *testing.T) {
+	var reads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		reads.Add(1)
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = w.Write([]byte("approved content"))
+	}))
+	defer server.Close()
+
+	runtime := newTestRuntime(t, llm.NewFakeClient(server.URL))
+	settings, err := json.Marshal(InternetSettings{
+		Allow:           []string{server.URL},
+		RequireApproval: true,
+	})
+	if err != nil {
+		t.Fatalf("marshal settings: %v", err)
+	}
+	thread, err := runtime.CreateThread(Manifest{
+		Version: ManifestVersion,
+		Capabilities: []CapabilityConfig{{
+			Name: "internet.read", Settings: settings,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "read the page", nil)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	waitForStatus(t, runtime, run.ID, RunWaitingTask)
+	tasks, err := runtime.Tasks(run.ID)
+	if err != nil || len(tasks) != 1 {
+		t.Fatalf("tasks = %+v, err=%v", tasks, err)
+	}
+	if reads.Load() != 0 {
+		t.Fatalf("internet executed before approval")
+	}
+	if _, err := runtime.ResolveTask(tasks[0].ID, tasks[0].WebhookToken, task.Resolution{
+		Decision: task.StateApproved,
+		Actor:    "tester",
+	}); err != nil {
+		t.Fatalf("resolve task: %v", err)
+	}
+	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
+	if !strings.Contains(completed.Answer, "approved content") {
+		t.Fatalf("answer = %q", completed.Answer)
+	}
+	if reads.Load() != 1 {
+		t.Fatalf("internet reads = %d, want 1", reads.Load())
 	}
 }
 
@@ -326,8 +385,9 @@ func buildGuest(t *testing.T) string {
 		"-buildmode=c-shared",
 		"-tags", "tinygo",
 		"-o", wasmPath,
-		"../../guest",
+		"./agent",
 	)
+	cmd.Dir = "../../../aurora-brains"
 	cmd.Env = append(os.Environ(),
 		"XDG_CACHE_HOME="+t.TempDir(),
 		"GOCACHE="+filepath.Join(t.TempDir(), "go-build"),

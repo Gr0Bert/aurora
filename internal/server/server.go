@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"aurora-capcompute/internal/agent"
+	"aurora-capcompute/internal/task"
 )
 
 type Server struct {
@@ -37,11 +38,14 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/threads", s.createThread)
 	s.mux.HandleFunc("GET /v1/threads", s.listThreads)
+	s.mux.HandleFunc("GET /v1/brains", s.listBrains)
 	s.mux.HandleFunc("GET /v1/threads/{threadID}", s.getThread)
 	s.mux.HandleFunc("POST /v1/threads/{threadID}/messages", s.createRun)
 	s.mux.HandleFunc("GET /v1/threads/{threadID}/events", s.events)
 	s.mux.HandleFunc("GET /v1/runs/{runID}", s.getRun)
 	s.mux.HandleFunc("GET /v1/runs/{runID}/journal", s.getJournal)
+	s.mux.HandleFunc("GET /v1/runs/{runID}/tasks", s.getTasks)
+	s.mux.HandleFunc("POST /v1/tasks/{taskID}/resolve", s.resolveTask)
 	s.mux.HandleFunc("POST /v1/runs/{runID}/stop", s.stopRun)
 	s.mux.HandleFunc("POST /v1/runs/{runID}/retry", s.retryRun)
 }
@@ -64,6 +68,10 @@ func (s *Server) createThread(w http.ResponseWriter, request *http.Request) {
 
 func (s *Server) listThreads(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"threads": s.runtime.ListThreads()})
+}
+
+func (s *Server) listBrains(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"brains": s.runtime.Brains()})
 }
 
 func (s *Server) getThread(w http.ResponseWriter, request *http.Request) {
@@ -108,6 +116,36 @@ func (s *Server) getJournal(w http.ResponseWriter, request *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": journal})
+}
+
+func (s *Server) getTasks(w http.ResponseWriter, request *http.Request) {
+	tasks, err := s.runtime.Tasks(request.PathValue("runID"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"tasks": tasks})
+}
+
+func (s *Server) resolveTask(w http.ResponseWriter, request *http.Request) {
+	var resolution task.Resolution
+	if err := decodeJSON(request, &resolution); err != nil {
+		writeError(w, err)
+		return
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(request.Header.Get("Authorization"), "Bearer "))
+	if token == "" {
+		writeJSON(w, http.StatusUnauthorized, errorEnvelope{
+			Error: "unauthorized", Message: "bearer task token is required",
+		})
+		return
+	}
+	resolved, err := s.runtime.ResolveTask(request.PathValue("taskID"), token, resolution)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, resolved)
 }
 
 func (s *Server) stopRun(w http.ResponseWriter, request *http.Request) {
@@ -218,6 +256,18 @@ func writeError(w http.ResponseWriter, err error) {
 	case errors.Is(err, agent.ErrConflict):
 		status = http.StatusConflict
 		code = "conflict"
+	case errors.Is(err, task.ErrNotFound):
+		status = http.StatusNotFound
+		code = "not_found"
+	case errors.Is(err, task.ErrUnauthorized):
+		status = http.StatusUnauthorized
+		code = "unauthorized"
+	case errors.Is(err, task.ErrConflict):
+		status = http.StatusConflict
+		code = "conflict"
+	case errors.Is(err, task.ErrGone):
+		status = http.StatusGone
+		code = "gone"
 	}
 	writeJSON(w, status, errorEnvelope{Error: code, Message: err.Error()})
 }

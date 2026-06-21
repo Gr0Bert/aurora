@@ -43,7 +43,37 @@ func TestManifestRejectsUnknownCapability(t *testing.T) {
 			Name: "shell.exec",
 		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported capability") {
+	if err == nil || !strings.Contains(err.Error(), "unsupported dispatcher") {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestLegacyManifestIsNormalizedToVersionTwo(t *testing.T) {
+	manifest, err := ValidateManifest(Manifest{
+		Version: LegacyManifestVersion,
+		Capabilities: []CapabilityConfig{{
+			Name: "internet.read", Settings: json.RawMessage(`{"allow":["*"]}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("validate legacy manifest: %v", err)
+	}
+	if manifest.Version != ManifestVersion {
+		t.Fatalf("version = %d, want %d", manifest.Version, ManifestVersion)
+	}
+}
+
+func TestManifestAcceptsRegisteredMCPReferenceShape(t *testing.T) {
+	manifest, err := ValidateManifest(Manifest{
+		Version: ManifestVersion,
+		Capabilities: []CapabilityConfig{{
+			Name: "mcp.docs", Settings: json.RawMessage(`{"tools":["search"]}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("validate MCP manifest: %v", err)
+	}
+	if !strings.Contains(string(manifest.Capabilities[0].Settings), `"server_id":"docs"`) {
+		t.Fatalf("settings = %s", manifest.Capabilities[0].Settings)
 	}
 }

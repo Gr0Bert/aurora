@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -13,8 +14,10 @@ import (
 	"time"
 
 	"aurora-capcompute/internal/agent"
-	"aurora-capcompute/internal/llm"
 	auroraserver "aurora-capcompute/internal/server"
+	aurorasqlite "aurora-capcompute/internal/storage/sqlite"
+	"aurora-dispatchers/llm"
+	"aurora-dispatchers/mcp"
 )
 
 func main() {
@@ -31,11 +34,30 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	store, err := aurorasqlite.Open(envDefault("AURORA_DB", "aurora.db"))
+	if err != nil {
+		return fmt.Errorf("open durable store: %w", err)
+	}
+	brains, err := brainRegistryFromEnv()
+	if err != nil {
+		_ = store.Close()
+		return err
+	}
+	mcpServers, err := mcpServersFromEnv()
+	if err != nil {
+		_ = store.Close()
+		return err
+	}
 	runtime, err := agent.NewRuntime(ctx, agent.Config{
-		WasmPath: envDefault("AURORA_GUEST_WASM", "guest/agent.wasm"),
-		LLM:      llmClient,
+		Brains:     brains,
+		LLM:        llmClient,
+		TenantID:   envDefault("AURORA_TENANT_ID", agent.DefaultTenantID),
+		Store:      store,
+		TaskSecret: []byte(envDefault("AURORA_WEBHOOK_SECRET", "aurora-local-development-webhook-secret")),
+		MCPServers: mcpServers,
 	})
 	if err != nil {
+		_ = store.Close()
 		return fmt.Errorf("create agent runtime: %w", err)
 	}
 
@@ -63,6 +85,38 @@ func run() error {
 		defer cancel()
 		return auroraserver.Shutdown(shutdownCtx, httpServer, runtime)
 	}
+}
+
+func mcpServersFromEnv() (map[string]mcp.ServerConfig, error) {
+	raw := strings.TrimSpace(os.Getenv("AURORA_MCP_SERVERS"))
+	if raw == "" {
+		return nil, nil
+	}
+	var servers map[string]mcp.ServerConfig
+	if err := json.Unmarshal([]byte(raw), &servers); err != nil {
+		return nil, fmt.Errorf("decode AURORA_MCP_SERVERS: %w", err)
+	}
+	for id, server := range servers {
+		if strings.TrimSpace(server.ID) == "" {
+			server.ID = id
+		}
+		servers[id] = server
+	}
+	return servers, nil
+}
+
+func brainRegistryFromEnv() (*agent.BrainRegistry, error) {
+	raw := strings.TrimSpace(os.Getenv("AURORA_BRAINS"))
+	if raw == "" {
+		return agent.SingleBrainRegistry(
+			envDefault("AURORA_GUEST_WASM", "../aurora-brains/agent/agent.wasm"),
+		)
+	}
+	var paths map[string]string
+	if err := json.Unmarshal([]byte(raw), &paths); err != nil {
+		return nil, fmt.Errorf("decode AURORA_BRAINS: %w", err)
+	}
+	return agent.NewBrainRegistry(envDefault("AURORA_DEFAULT_BRAIN", agent.DefaultBrainID), paths)
 }
 
 func llmFromEnv() (llm.Client, error) {

@@ -23,8 +23,8 @@ import (
 	"time"
 
 	internalhost "aurora-capcompute/internal/host"
-	"aurora-capcompute/internal/internet"
-	"aurora-capcompute/internal/llm"
+	"aurora-dispatchers/internet"
+	"aurora-dispatchers/llm"
 	extism "github.com/extism/go-sdk"
 )
 
@@ -404,9 +404,9 @@ func TestTinyGoGuestReturnsCapabilityFailureToModel(t *testing.T) {
 	if !strings.Contains(string(result.Output), "answered from the usable source") {
 		t.Fatalf("output does not contain final answer: %s", result.Output)
 	}
-	// The replay tape records successful results only. The failed read is
-	// deliberately not cached, but the guest still returns it to the model.
-	assertRecordedCalls(t, journal, []string{"llm.chat", "internet.read", "llm.chat"})
+	// Deterministic tool failures are journaled so restart replay does not
+	// repeat them.
+	assertRecordedCalls(t, journal, []string{"llm.chat", "internet.read", "internet.read", "llm.chat"})
 }
 
 func assertRecordedCalls(t *testing.T, journal *memory.Journal, want []string) {
@@ -574,8 +574,10 @@ func (f *yieldOnceFactory) NewDispatcher(context.Context, integrationRun) (dispa
 	next := &yieldOnceDispatcher{
 		yielded: &f.yielded,
 		next: &internalhost.Dispatcher[integrationRun]{
-			LLM:      f.llm,
-			Internet: f.internet,
+			Config: internalhost.Config{
+				LLM:      f.llm,
+				Internet: f.internet,
+			},
 		},
 	}
 	return replay.NewDispatcher[integrationRun](journaled.NewTape(f.journal), next), nil
@@ -705,8 +707,9 @@ func buildGuest(t *testing.T) string {
 		"-buildmode=c-shared",
 		"-tags", "tinygo",
 		"-o", wasmPath,
-		"./guest",
+		"./agent",
 	)
+	cmd.Dir = "../aurora-brains"
 	cmd.Env = append(os.Environ(),
 		"XDG_CACHE_HOME="+t.TempDir(),
 		"GOCACHE="+filepath.Join(t.TempDir(), "go-build"),

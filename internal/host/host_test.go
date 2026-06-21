@@ -8,8 +8,8 @@ import (
 	"testing"
 
 	internalhost "aurora-capcompute/internal/host"
-	"aurora-capcompute/internal/internet"
-	"aurora-capcompute/internal/llm"
+	"aurora-dispatchers/internet"
+	"aurora-dispatchers/llm"
 	"capcompute/dispatcher"
 )
 
@@ -17,7 +17,7 @@ type run struct{}
 
 func TestDispatcherLLMChatReturnsFakeContent(t *testing.T) {
 	dispatch := &internalhost.Dispatcher[run]{
-		LLM: llm.NewFakeClient("https://example.com"),
+		Config: internalhost.Config{LLM: llm.NewFakeClient("https://example.com")},
 	}
 	args := mustJSON(t, llm.ChatRequest{
 		Messages: []llm.Message{{Role: "user", Content: "read"}},
@@ -67,7 +67,7 @@ func TestDispatcherInternetReadReturnsAllowedResource(t *testing.T) {
 		t.Fatalf("parse policy: %v", err)
 	}
 	dispatch := &internalhost.Dispatcher[run]{
-		Internet: internet.NewClient(policy),
+		Config: internalhost.Config{Internet: internet.NewClient(policy)},
 	}
 	args := mustJSON(t, internet.ReadRequest{Method: "GET", URL: server.URL})
 

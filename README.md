@@ -1,11 +1,13 @@
 # aurora-capcompute
 
-Minimal Aurora-on-`capcompute` prototype.
+Durable Aurora orchestration server built on `capcompute`.
 
 All rights reserved.
 
-The TinyGo guest owns the agent loop and calls only `extism:host/compute/play`.
-The Go host owns all side effects: `llm.chat` and `internet.read`. The guest does
+The TinyGo guest in the sibling `aurora-brains` project owns the agent loop and
+calls only `extism:host/compute/play`.
+The Go host owns all side effects. Concrete LLM, internet, and MCP
+implementations live in the sibling `aurora-dispatchers` project. The guest does
 not use Extism built-in HTTP or Extism network policy.
 
 Each model turn returns a JSON object containing an `actions` array. The guest executes batched
@@ -19,18 +21,22 @@ containing any accepted form.
 
 - `cmd/aurora-agent`: runnable host.
 - `cmd/aurora-server`: long-lived REST/SSE agent server.
-- `guest/agent.go`: TinyGo/Wasm guest entrypoint `run`.
+- `../aurora-brains/agent`: TinyGo/Wasm guest entrypoint `run`.
 - `internal/agent`: process-lifetime thread, run, session, and journal ownership.
 - `internal/server`: HTTP and SSE transport.
-- `internal/host`: `dispatcher.Call` handlers.
-- `internal/llm`: fake and OpenAI-compatible LLM clients.
-- `internal/internet`: allowlisted HTTP reads.
+- `internal/host`: durable replay/task composition around registered dispatchers.
+- `internal/storage/sqlite`: SQLite adapter behind Aurora storage interfaces.
+- `internal/task`: webhook task coordination.
+
+The previous `internal/llm` and `internal/internet` implementations have moved
+to `../aurora-dispatchers`. Agent brain source and artifacts live in
+`../aurora-brains`.
 
 ## Build And Test
 
 ```sh
 GOCACHE=/tmp/aurora-capcompute-go-build go test ./...
-sh guest/build.sh
+sh ../aurora-brains/agent/build.sh
 AURORA_LLM=fake AURORA_HTTP_ALLOW=GET:https://example.com go run ./cmd/aurora-agent
 ```
 
@@ -41,7 +47,7 @@ active play handles, and replay journals in memory for the lifetime of the
 process:
 
 ```sh
-sh guest/build.sh
+sh ../aurora-brains/agent/build.sh
 
 AURORA_LLM=openai \
 go run ./cmd/aurora-server
@@ -102,7 +108,23 @@ Inspect a run or its complete journal:
 ```sh
 curl -sS http://127.0.0.1:8080/v1/runs/RUN_ID
 curl -sS http://127.0.0.1:8080/v1/runs/RUN_ID/journal
+curl -sS http://127.0.0.1:8080/v1/runs/RUN_ID/tasks
 ```
+
+When a dispatcher yields, Aurora creates a durable task and the run enters
+`waiting_for_task`. Resolve it with the task's single-purpose token:
+
+```sh
+curl -sS -X POST \
+  -H 'Authorization: Bearer TASK_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"decision":"approved","actor":"operator"}' \
+  http://127.0.0.1:8080/v1/tasks/TASK_ID/resolve
+```
+
+Decisions are `approved`, `denied`, `completed`, `failed`, and `cancelled`.
+Approved tasks redispatch the immutable original call. Completed tasks use the
+provided JSON `data` as the tool result. Resolution is idempotent.
 
 Receive thread events:
 
@@ -138,8 +160,20 @@ tools exposed by that session's dispatcher, including their manifest-derived
 descriptions and input schemas. The guest forwards model actions generically by
 capability name. `final` remains the only guest-reserved action.
 
-The server has no authentication or CORS policy. It stores everything in memory,
-so all state disappears when the process exits.
+Manifest version 2 adds a registered `brain` reference. Version 1 manifests are
+accepted and normalized to version 2. MCP dispatcher entries use names such as
+`mcp.docs` and reference an operator-registered server:
+
+```json
+{
+  "name": "mcp.docs",
+  "settings": {"server_id": "docs", "tools": ["search"]}
+}
+```
+
+The server has no authentication or CORS policy. Threads, runs, completed
+conversation history, and replay journals are stored in SQLite and restored
+after restart. Physical Wasm sessions and dispatcher instances are recreated.
 
 For the standalone debug interface, run the sibling `aurora-ui` project. Its
 dependency-free Node server serves the browser files and proxies `/v1` to this
@@ -150,8 +184,17 @@ server, avoiding any CORS requirement.
 - `AURORA_LLM=fake|openai`, default `fake`.
 - `AURORA_FAKE_READ_URL`, default `https://example.com`.
 - `AURORA_HTTP_ALLOW`, CLI-only fallback manifest, for example `GET:https://example.com`.
-- `AURORA_GUEST_WASM`, default `guest/agent.wasm`.
+- `AURORA_GUEST_WASM`, default `../aurora-brains/agent/agent.wasm`.
+- `AURORA_BRAINS`, optional JSON object mapping registered brain IDs to Wasm
+  paths.
+- `AURORA_DEFAULT_BRAIN`, default `aurora-default@1`.
+- `AURORA_MCP_SERVERS`, optional JSON object mapping operator-controlled MCP
+  server IDs to stdio command configurations.
 - `AURORA_SERVER_ADDR`, default `127.0.0.1:8080`.
+- `AURORA_DB`, default `aurora.db`.
+- `AURORA_TENANT_ID`, default `local`.
+- `AURORA_WEBHOOK_SECRET`, required to remain stable across restarts for durable
+  task webhook tokens; a development-only fallback is used locally.
 - `AURORA_MESSAGE`, or pass the message as CLI arguments.
 
 The guest has no step limit. The host controls execution through the

@@ -17,8 +17,8 @@ import (
 	"time"
 
 	"aurora-capcompute/internal/agent"
-	"aurora-capcompute/internal/internet"
-	"aurora-capcompute/internal/llm"
+	"aurora-dispatchers/internet"
+	"aurora-dispatchers/llm"
 )
 
 type finalLLM struct{}
@@ -58,6 +58,12 @@ func TestRESTAndSSELifecycle(t *testing.T) {
 	if thread.ID == "" {
 		t.Fatal("thread id is empty")
 	}
+	brains := requestJSON[struct {
+		Brains []agent.BrainArtifact `json:"brains"`
+	}](t, http.MethodGet, httpServer.URL+"/v1/brains", nil, http.StatusOK)
+	if len(brains.Brains) != 1 || brains.Brains[0].Digest == "" {
+		t.Fatalf("brains = %+v", brains.Brains)
+	}
 
 	response, err := http.Get(httpServer.URL + "/v1/threads/" + thread.ID + "/events")
 	if err != nil {
@@ -88,6 +94,12 @@ func TestRESTAndSSELifecycle(t *testing.T) {
 	}](t, http.MethodGet, httpServer.URL+"/v1/runs/"+run.ID+"/journal", nil, http.StatusOK)
 	if len(journal.Entries) != 1 || journal.Entries[0].Call.Name != "llm.chat" {
 		t.Fatalf("journal = %+v", journal.Entries)
+	}
+	tasks := requestJSON[struct {
+		Tasks []agent.TaskSnapshot `json:"tasks"`
+	}](t, http.MethodGet, httpServer.URL+"/v1/runs/"+run.ID+"/tasks", nil, http.StatusOK)
+	if len(tasks.Tasks) != 0 {
+		t.Fatalf("tasks = %+v", tasks.Tasks)
 	}
 
 	gotThread := requestJSON[agent.ThreadSnapshot](t, http.MethodGet,
@@ -167,8 +179,9 @@ func buildGuest(t *testing.T) string {
 		"-buildmode=c-shared",
 		"-tags", "tinygo",
 		"-o", wasmPath,
-		"../../guest",
+		"./agent",
 	)
+	cmd.Dir = "../../../aurora-brains"
 	cmd.Env = append(os.Environ(),
 		"XDG_CACHE_HOME="+t.TempDir(),
 		"GOCACHE="+filepath.Join(t.TempDir(), "go-build"),

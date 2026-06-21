@@ -1,21 +1,25 @@
 package agent
 
 import (
-	"capcompute/dispatcher"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"aurora-capcompute/internal/host"
-	"aurora-capcompute/internal/internet"
-	"aurora-capcompute/internal/llm"
+	"aurora-dispatchers/llm"
+	"aurora-dispatchers/mcp"
+	dispatcherregistry "aurora-dispatchers/registry"
 )
 
-const ManifestVersion = 1
+const (
+	LegacyManifestVersion = 1
+	ManifestVersion       = 2
+)
 
 type Manifest struct {
 	Version      int                `json:"version"`
+	Brain        string             `json:"brain,omitempty"`
 	SystemPrompt string             `json:"system_prompt,omitempty"`
 	Capabilities []CapabilityConfig `json:"capabilities"`
 }
@@ -25,11 +29,8 @@ type CapabilityConfig struct {
 	Settings json.RawMessage `json:"settings,omitempty"`
 }
 
-type InternetSettings struct {
-	Allow            []string `json:"allow"`
-	TimeoutMS        int64    `json:"timeout_ms,omitempty"`
-	MaxResponseBytes int64    `json:"max_response_bytes,omitempty"`
-}
+type InternetSettings = dispatcherregistry.InternetSettings
+type MCPSettings = dispatcherregistry.MCPSettings
 
 func DefaultManifest(allowlist string) (Manifest, error) {
 	settings := InternetSettings{}
@@ -56,10 +57,18 @@ func DefaultManifest(allowlist string) (Manifest, error) {
 }
 
 func ValidateManifest(manifest Manifest) (Manifest, error) {
+	return validateManifestWithRegistry(manifest, dispatcherregistry.Default())
+}
+
+func validateManifestWithRegistry(manifest Manifest, registry *dispatcherregistry.Registry) (Manifest, error) {
+	if manifest.Version == LegacyManifestVersion {
+		manifest.Version = ManifestVersion
+	}
 	if manifest.Version != ManifestVersion {
 		return Manifest{}, fmt.Errorf("%w: manifest version must be %d", ErrInvalid, ManifestVersion)
 	}
 	manifest.SystemPrompt = strings.TrimSpace(manifest.SystemPrompt)
+	manifest.Brain = strings.TrimSpace(manifest.Brain)
 	seen := make(map[string]struct{}, len(manifest.Capabilities))
 	for i := range manifest.Capabilities {
 		capability := &manifest.Capabilities[i]
@@ -71,32 +80,35 @@ func ValidateManifest(manifest Manifest) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("%w: duplicate capability %q", ErrInvalid, capability.Name)
 		}
 		seen[capability.Name] = struct{}{}
-		switch capability.Name {
-		case "internet.read":
-			settings, err := decodeInternetSettings(capability.Settings)
-			if err != nil {
-				return Manifest{}, fmt.Errorf("%w: internet.read settings: %v", ErrInvalid, err)
-			}
-			capability.Settings, _ = json.Marshal(settings)
-		default:
-			return Manifest{}, fmt.Errorf("%w: unsupported capability %q", ErrInvalid, capability.Name)
+		normalized, err := registry.Normalize(capability.Name, capability.Settings)
+		if err != nil {
+			return Manifest{}, fmt.Errorf("%w: %s settings: %v", ErrInvalid, capability.Name, err)
 		}
+		capability.Settings = normalized
 	}
 	return cloneManifest(manifest), nil
 }
 
 func EffectiveManifest(base Manifest, overrides []CapabilityConfig) (Manifest, error) {
+	return effectiveManifestWithRegistry(base, overrides, dispatcherregistry.Default())
+}
+
+func effectiveManifestWithRegistry(
+	base Manifest,
+	overrides []CapabilityConfig,
+	registry *dispatcherregistry.Registry,
+) (Manifest, error) {
 	effective := cloneManifest(base)
 	index := make(map[string]int, len(effective.Capabilities))
 	for i, capability := range effective.Capabilities {
 		index[capability.Name] = i
 	}
 	for _, override := range overrides {
-		overrideManifest, err := ValidateManifest(Manifest{
+		overrideManifest, err := validateManifestWithRegistry(Manifest{
 			Version:      ManifestVersion,
 			SystemPrompt: effective.SystemPrompt,
 			Capabilities: []CapabilityConfig{override},
-		})
+		}, registry)
 		if err != nil {
 			return Manifest{}, err
 		}
@@ -112,60 +124,48 @@ func EffectiveManifest(base Manifest, overrides []CapabilityConfig) (Manifest, e
 }
 
 func DispatcherConfig(manifest Manifest, llmClient llm.Client) (host.Config, error) {
-	config := host.Config{LLM: llmClient}
+	return DispatcherConfigWithMCP(context.Background(), manifest, llmClient, nil)
+}
+
+func DispatcherConfigWithMCP(
+	ctx context.Context,
+	manifest Manifest,
+	llmClient llm.Client,
+	servers map[string]mcp.ServerConfig,
+) (host.Config, error) {
+	return dispatcherConfigWithRegistry(ctx, manifest, llmClient, servers, dispatcherregistry.Default())
+}
+
+func dispatcherConfigWithRegistry(
+	ctx context.Context,
+	manifest Manifest,
+	llmClient llm.Client,
+	servers map[string]mcp.ServerConfig,
+	registry *dispatcherregistry.Registry,
+) (host.Config, error) {
+	entries := make([]dispatcherregistry.Entry, 0, len(manifest.Capabilities))
 	for _, capability := range manifest.Capabilities {
-		switch capability.Name {
-		case "internet.read":
-			settings, err := decodeInternetSettings(capability.Settings)
-			if err != nil {
-				return host.Config{}, err
-			}
-			entries := make([]string, 0, len(settings.Allow))
-			for _, origin := range settings.Allow {
-				entries = append(entries, "GET:"+origin)
-			}
-			policy, err := internet.ParseAllowlist(strings.Join(entries, ","))
-			if err != nil {
-				return host.Config{}, err
-			}
-			timeout := time.Duration(settings.TimeoutMS) * time.Millisecond
-			config.Internet = internet.NewConfiguredClient(policy, timeout, settings.MaxResponseBytes)
-			description := "Read textual content with HTTP GET. Allowed origins: " + strings.Join(settings.Allow, ", ")
-			config.Capabilities = append(config.Capabilities, dispatcher.Capability{
-				Name:        "internet.read",
-				Description: description,
-				InputSchema: json.RawMessage(`{"type":"object","properties":{"method":{"type":"string","const":"GET"},"url":{"type":"string","format":"uri"}},"required":["method","url"],"additionalProperties":false}`),
-			})
-		}
+		entries = append(entries, dispatcherregistry.Entry{
+			Name: capability.Name, Settings: capability.Settings,
+		})
+	}
+	config, err := registry.Build(ctx, entries, dispatcherregistry.Services{
+		LLM: llmClient, MCPServers: servers,
+	})
+	if err != nil {
+		return host.Config{}, fmt.Errorf("%w: build dispatchers: %v", ErrInvalid, err)
 	}
 	return config, nil
 }
 
 func decodeInternetSettings(raw json.RawMessage) (InternetSettings, error) {
-	settings := InternetSettings{
-		TimeoutMS:        int64(internet.DefaultTimeout / time.Millisecond),
-		MaxResponseBytes: internet.DefaultMaxResponseBytes,
+	normalized, err := dispatcherregistry.Default().Normalize("internet.read", raw)
+	if err != nil {
+		return InternetSettings{}, err
 	}
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &settings); err != nil {
-			return InternetSettings{}, err
-		}
-	}
-	if len(settings.Allow) == 0 {
-		return InternetSettings{}, fmt.Errorf("allow must contain at least one origin or *")
-	}
-	for i, origin := range settings.Allow {
-		origin = strings.TrimSpace(origin)
-		if origin == "" {
-			return InternetSettings{}, fmt.Errorf("allow entry %d is empty", i)
-		}
-		settings.Allow[i] = origin
-	}
-	if settings.TimeoutMS <= 0 {
-		return InternetSettings{}, fmt.Errorf("timeout_ms must be positive")
-	}
-	if settings.MaxResponseBytes <= 0 {
-		return InternetSettings{}, fmt.Errorf("max_response_bytes must be positive")
+	var settings InternetSettings
+	if err := json.Unmarshal(normalized, &settings); err != nil {
+		return InternetSettings{}, err
 	}
 	return settings, nil
 }

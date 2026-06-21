@@ -17,7 +17,7 @@ import (
 
 	"aurora-capcompute/internal/agent"
 	internalhost "aurora-capcompute/internal/host"
-	"aurora-capcompute/internal/llm"
+	"aurora-dispatchers/llm"
 
 	extism "github.com/extism/go-sdk"
 )
@@ -85,7 +85,7 @@ func execute(ctx context.Context, args []string) (executeResult, error) {
 		return executeResult{}, fmt.Errorf("build dispatcher: %w", err)
 	}
 
-	wasmPath := envDefault("AURORA_GUEST_WASM", "guest/agent.wasm")
+	wasmPath := envDefault("AURORA_GUEST_WASM", "../aurora-brains/agent/agent.wasm")
 	journal := memory.NewJournal()
 	store := session_store_memory.New[string, Run]()
 	compute, err := capcompute.NewComputeCompiledPlugin[string, Run](ctx, capcompute.Config[string, Run]{
@@ -96,9 +96,10 @@ func execute(ctx context.Context, args []string) (executeResult, error) {
 			EnableWasi: true,
 		},
 		Dispatchers: internalhost.Factory[Run]{
-			LLM:          hostConfig.LLM,
-			Internet:     hostConfig.Internet,
-			Capabilities: hostConfig.Capabilities,
+			LLM:                     hostConfig.LLM,
+			Internet:                hostConfig.Internet,
+			InternetRequireApproval: hostConfig.InternetRequireApproval,
+			Capabilities:            hostConfig.Capabilities,
 			NewTape: func(context.Context, Run) (replay.Tape, error) {
 				return journaled.NewTape(journal), nil
 			},
