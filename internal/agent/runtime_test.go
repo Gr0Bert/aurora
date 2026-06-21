@@ -2,334 +2,328 @@ package agent
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"aurora-capcompute/internal/task"
-	"aurora-dispatchers/internet"
-	"aurora-dispatchers/llm"
+	"capcompute"
+	"capcompute/dispatcher"
+	"capcompute/dispatcher/replay/tape/journaled"
 )
 
-type finalLLM struct {
+type runtimeDispatchers struct {
+	mu        sync.Mutex
+	manifests []Manifest
+}
+
+func (*runtimeDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
+	if len(settings) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), settings...), nil
+}
+
+func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ RunContext, manifest Manifest) (dispatcher.Dispatcher[RunContext], error) {
+	p.mu.Lock()
+	p.manifests = append(p.manifests, cloneManifest(manifest))
+	p.mu.Unlock()
+	return finalDispatcher{}, nil
+}
+
+type finalDispatcher struct{}
+
+func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+	if call.Name != "llm.chat" {
+		return dispatcher.Failed("unsupported call: " + call.Name), nil
+	}
+	return dispatcher.Result(json.RawMessage(
+		`{"content":"{\"actions\":[{\"action\":\"final\",\"content\":{\"answer\":\"done\"}}]}"}`,
+	)), nil
+}
+
+type runtimeStore struct {
 	mu       sync.Mutex
-	requests []llm.ChatRequest
+	state    StoredState
+	journals map[string]*testJournal
+	tasks    map[string]task.Record
+	leases   map[string]string
 }
 
-func (c *finalLLM) Chat(_ context.Context, request llm.ChatRequest) (llm.ChatResponse, error) {
-	c.mu.Lock()
-	c.requests = append(c.requests, request)
-	c.mu.Unlock()
-	return llm.ChatResponse{Content: `[{"action":"final","content":{"answer":"done"}}]`}, nil
+func newRuntimeStore() *runtimeStore {
+	return &runtimeStore{
+		journals: make(map[string]*testJournal),
+		tasks:    make(map[string]task.Record),
+		leases:   make(map[string]string),
+	}
 }
 
-func (c *finalLLM) Requests() []llm.ChatRequest {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]llm.ChatRequest(nil), c.requests...)
+func (s *runtimeStore) Load(context.Context, string) (StoredState, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state, nil
 }
 
-type unusedInternet struct{}
-
-func (unusedInternet) Read(context.Context, internet.ReadRequest) (internet.ReadResponse, error) {
-	return internet.ReadResponse{}, fmt.Errorf("internet should not be called")
+func (s *runtimeStore) SaveThread(_ context.Context, thread StoredThread) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Threads {
+		if s.state.Threads[i].ID == thread.ID {
+			s.state.Threads[i] = thread
+			return nil
+		}
+	}
+	s.state.Threads = append(s.state.Threads, thread)
+	return nil
 }
 
-func TestRuntimeCarriesOnlyCompactCompletedHistory(t *testing.T) {
-	model := &finalLLM{}
-	runtime := newTestRuntime(t, model)
-	thread, err := runtime.CreateThread(Manifest{Version: ManifestVersion})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
+func (s *runtimeStore) SaveRun(_ context.Context, run StoredRun) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.state.Runs {
+		if s.state.Runs[i].ID == run.ID {
+			s.state.Runs[i] = run
+			return nil
+		}
 	}
+	s.state.Runs = append(s.state.Runs, run)
+	return nil
+}
 
-	first, err := runtime.CreateRun(thread.ID, "first question", nil)
-	if err != nil {
-		t.Fatalf("create first run: %v", err)
+func (s *runtimeStore) AppendMessages(_ context.Context, tenantID, threadID string, messages []HistoryMessage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	position := len(s.state.Messages)
+	for _, message := range messages {
+		s.state.Messages = append(s.state.Messages, StoredMessage{
+			TenantID: tenantID, ThreadID: threadID, Position: position,
+			Role: message.Role, Content: message.Content,
+		})
+		position++
 	}
-	waitForStatus(t, runtime, first.ID, RunCompleted)
+	return nil
+}
 
-	second, err := runtime.CreateRun(thread.ID, "second question", nil)
-	if err != nil {
-		t.Fatalf("create second run: %v", err)
+func (s *runtimeStore) OpenJournal(_ context.Context, key RunContext) (journaled.Journal, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	journal := s.journals[key.SessionKey()]
+	if journal == nil {
+		journal = &testJournal{}
+		s.journals[key.SessionKey()] = journal
 	}
-	waitForStatus(t, runtime, second.ID, RunCompleted)
+	return journal, nil
+}
 
-	requests := model.Requests()
-	if len(requests) != 2 {
-		t.Fatalf("llm requests = %d, want 2", len(requests))
+func (s *runtimeStore) ResetJournal(_ context.Context, key RunContext) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.journals[key.SessionKey()] = &testJournal{}
+	return nil
+}
+
+func (s *runtimeStore) AcquireLease(_ context.Context, tenant, kind, resource, holder string, _ time.Time, _ time.Duration) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenant + "/" + kind + "/" + resource
+	if current := s.leases[key]; current != "" && current != holder {
+		return false, nil
 	}
-	messages := requests[1].Messages
-	if len(messages) != 4 {
-		t.Fatalf("second request messages = %d, want system + prior pair + current user", len(messages))
+	s.leases[key] = holder
+	return true, nil
+}
+
+func (s *runtimeStore) ReleaseLease(_ context.Context, tenant, kind, resource, holder string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := tenant + "/" + kind + "/" + resource
+	if s.leases[key] == holder {
+		delete(s.leases, key)
 	}
-	want := []struct {
-		role    string
-		content string
+	return nil
+}
+
+func (s *runtimeStore) Find(_ context.Context, scope task.Scope, position int, hash string) (task.Record, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, record := range s.tasks {
+		if record.Scope == scope && record.JournalPosition == position && record.CallHash == hash {
+			return record, true, nil
+		}
+	}
+	return task.Record{}, false, nil
+}
+
+func (s *runtimeStore) Create(_ context.Context, record task.Record) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.tasks[record.ID]; exists {
+		return task.ErrConflict
+	}
+	s.tasks[record.ID] = record
+	return nil
+}
+
+func (s *runtimeStore) Get(_ context.Context, _ string, taskID string) (task.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.tasks[taskID]
+	if !ok {
+		return task.Record{}, task.ErrNotFound
+	}
+	return record, nil
+}
+
+func (s *runtimeStore) List(_ context.Context, _ string, runID string) ([]task.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var records []task.Record
+	for _, record := range s.tasks {
+		if runID == "" || record.Scope.RunID == runID {
+			records = append(records, record)
+		}
+	}
+	return records, nil
+}
+
+func (s *runtimeStore) Resolve(_ context.Context, _ string, taskID string, tokenHash []byte, resolution task.Resolution, now time.Time) (task.Record, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.tasks[taskID]
+	if !ok {
+		return task.Record{}, task.ErrNotFound
+	}
+	if !hmac.Equal(record.TokenHash, tokenHash) {
+		return task.Record{}, task.ErrUnauthorized
+	}
+	record.State = resolution.Decision
+	record.Resolution = resolution
+	record.ResolvedAt = &now
+	s.tasks[taskID] = record
+	return record, nil
+}
+
+func (s *runtimeStore) MarkExecuted(_ context.Context, _ string, taskID string, _ time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record := s.tasks[taskID]
+	record.State = task.StateExecuted
+	s.tasks[taskID] = record
+	return nil
+}
+
+type testJournal struct {
+	mu      sync.Mutex
+	records []journaled.Record
+}
+
+func (j *testJournal) Load(index int) (journaled.Record, error) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if index < 0 || index >= len(j.records) {
+		return journaled.Record{}, errors.New("record not found")
+	}
+	return j.records[index], nil
+}
+
+func (j *testJournal) Store(index int, call dispatcher.Call, outcome dispatcher.Outcome) error {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	if index != len(j.records) {
+		return errors.New("invalid index")
+	}
+	j.records = append(j.records, journaled.Record{Call: call.Copy(), Outcome: outcome.Copy()})
+	return nil
+}
+
+func (j *testJournal) Length() int {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return len(j.records)
+}
+
+type runtimeSessions struct {
+	mu       sync.Mutex
+	sessions map[string]*capcompute.Session[RunContext]
+}
+
+func newRuntimeSessions() *runtimeSessions {
+	return &runtimeSessions{sessions: make(map[string]*capcompute.Session[RunContext])}
+}
+
+func (s *runtimeSessions) LoadSession(_ context.Context, id string) (*capcompute.Session[RunContext], error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	session := s.sessions[id]
+	if session == nil {
+		return nil, capcompute.ErrSessionRequired
+	}
+	return session, nil
+}
+
+func (s *runtimeSessions) SaveSession(_ context.Context, id string, session *capcompute.Session[RunContext]) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sessions[id] = session
+	return nil
+}
+
+func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
+	store := newRuntimeStore()
+	dispatchers := &runtimeDispatchers{}
+	sessions := newRuntimeSessions()
+	brains := staticBrains{defaultID: "brain@1", sources: []BrainSource{{ID: "brain@1", Wasm: []byte("wasm")}}}
+	base := Config{
+		Brains: brains, Dispatchers: dispatchers, StateStore: store,
+		TaskStore: store, SessionStore: sessions, TaskSecret: []byte("secret"),
+	}
+	tests := []struct {
+		name   string
+		mutate func(*Config)
 	}{
-		{role: "system"},
-		{role: "user", content: "first question"},
-		{role: "assistant", content: "done"},
-		{role: "user", content: "second question"},
+		{name: "brain provider", mutate: func(config *Config) { config.Brains = nil }},
+		{name: "dispatcher provider", mutate: func(config *Config) { config.Dispatchers = nil }},
+		{name: "state store", mutate: func(config *Config) { config.StateStore = nil }},
+		{name: "task store", mutate: func(config *Config) { config.TaskStore = nil }},
+		{name: "session store", mutate: func(config *Config) { config.SessionStore = nil }},
+		{name: "task secret", mutate: func(config *Config) { config.TaskSecret = nil }},
 	}
-	for i, expected := range want {
-		if messages[i].Role != expected.role {
-			t.Fatalf("message %d role = %q, want %q", i, messages[i].Role, expected.role)
-		}
-		if expected.content != "" && messages[i].Content != expected.content {
-			t.Fatalf("message %d content = %q, want %q", i, messages[i].Content, expected.content)
-		}
-		if messages[i].Role == "tool" {
-			t.Fatalf("message %d unexpectedly contains tool history", i)
-		}
-	}
-
-	snapshot, err := runtime.GetThread(thread.ID)
-	if err != nil {
-		t.Fatalf("get thread: %v", err)
-	}
-	if len(snapshot.History) != 4 {
-		t.Fatalf("history entries = %d, want 4", len(snapshot.History))
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := base
+			test.mutate(&config)
+			if _, err := NewRuntime(context.Background(), config); err == nil {
+				t.Fatal("expected missing dependency error")
+			}
+		})
 	}
 }
 
-func TestThreadTitleUsesFirstMessagePreview(t *testing.T) {
-	model := &finalLLM{}
-	runtime := newTestRuntime(t, model)
-	thread, err := runtime.CreateThread(Manifest{Version: ManifestVersion})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
+func TestRuntimePassesEffectiveManifestToDispatcherProvider(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not found")
 	}
-	if thread.Title != "New thread" {
-		t.Fatalf("initial title = %q, want New thread", thread.Title)
-	}
-
-	message := strings.Repeat("界", 61)
-	run, err := runtime.CreateRun(thread.ID, "  "+message+"  ", nil)
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	waitForStatus(t, runtime, run.ID, RunCompleted)
-
-	updated, err := runtime.GetThread(thread.ID)
-	if err != nil {
-		t.Fatalf("get thread: %v", err)
-	}
-	want := strings.Repeat("界", 60) + "…"
-	if updated.Title != want {
-		t.Fatalf("title = %q, want %q", updated.Title, want)
-	}
-}
-
-func TestRunSnapshotsEffectiveManifest(t *testing.T) {
-	model := &finalLLM{}
-	runtime := newTestRuntime(t, model)
-	thread, err := runtime.CreateThread(Manifest{
-		Version:      ManifestVersion,
-		SystemPrompt: "thread prompt",
-		Capabilities: []CapabilityConfig{{
-			Name:     "internet.read",
-			Settings: json.RawMessage(`{"allow":["https://go.dev"]}`),
-		}},
-	})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	run, err := runtime.CreateRun(thread.ID, "question", []CapabilityConfig{{
-		Name:     "internet.read",
-		Settings: json.RawMessage(`{"allow":["*"]}`),
-	}})
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
-	if completed.EffectiveManifest.SystemPrompt != "thread prompt" {
-		t.Fatalf("system prompt = %q", completed.EffectiveManifest.SystemPrompt)
-	}
-	if completed.EffectiveManifest.Brain != DefaultBrainID || completed.BrainDigest == "" {
-		t.Fatalf("brain snapshot = %q digest=%q", completed.EffectiveManifest.Brain, completed.BrainDigest)
-	}
-	if !strings.Contains(string(completed.EffectiveManifest.Capabilities[0].Settings), `"*"`) {
-		t.Fatalf("effective settings = %s", completed.EffectiveManifest.Capabilities[0].Settings)
-	}
-	requests := model.Requests()
-	if len(requests) != 1 {
-		t.Fatalf("llm requests = %d, want 1", len(requests))
-	}
-	var systemMessages []string
-	for _, message := range requests[0].Messages {
-		if message.Role == "system" {
-			systemMessages = append(systemMessages, message.Content)
-		}
-	}
-	if len(systemMessages) != 1 {
-		t.Fatalf("system messages = %d, want one generated prompt", len(systemMessages))
-	}
-	prompt := systemMessages[0]
-	for _, expected := range []string{
-		"thread prompt",
-		"Available tools for this run:",
-		"Name: internet.read",
-		"Allowed origins: *",
-		`"const":"GET"`,
-		`{"actions":[{"action":"<exact tool name>"`,
-	} {
-		if !strings.Contains(prompt, expected) {
-			t.Fatalf("generated system prompt does not contain %q:\n%s", expected, prompt)
-		}
-	}
-	if strings.Contains(prompt, "https://go.dev") {
-		t.Fatalf("generated system prompt leaked base capability settings after override:\n%s", prompt)
-	}
-}
-
-func TestRuntimeGeneratesFinalOnlyProtocolWithoutCapabilities(t *testing.T) {
-	model := &finalLLM{}
-	runtime := newTestRuntime(t, model)
-	thread, err := runtime.CreateThread(Manifest{
-		Version:      ManifestVersion,
-		SystemPrompt: "Answer concisely.",
-	})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	run, err := runtime.CreateRun(thread.ID, "question", nil)
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	waitForStatus(t, runtime, run.ID, RunCompleted)
-
-	requests := model.Requests()
-	if len(requests) != 1 || len(requests[0].Messages) == 0 {
-		t.Fatalf("requests = %+v", requests)
-	}
-	prompt := requests[0].Messages[0].Content
-	if !strings.Contains(prompt, "Answer concisely.") ||
-		!strings.Contains(prompt, "Available tools for this run:\nNone.") {
-		t.Fatalf("generated final-only prompt = %q", prompt)
-	}
-}
-
-func TestRuntimeResumesApprovedWebhookTask(t *testing.T) {
-	var reads atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		reads.Add(1)
-		w.Header().Set("Content-Type", "text/plain")
-		_, _ = w.Write([]byte("approved content"))
-	}))
-	defer server.Close()
-
-	runtime := newTestRuntime(t, llm.NewFakeClient(server.URL))
-	settings, err := json.Marshal(InternetSettings{
-		Allow:           []string{server.URL},
-		RequireApproval: true,
-	})
-	if err != nil {
-		t.Fatalf("marshal settings: %v", err)
-	}
-	thread, err := runtime.CreateThread(Manifest{
-		Version: ManifestVersion,
-		Capabilities: []CapabilityConfig{{
-			Name: "internet.read", Settings: settings,
-		}},
-	})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	run, err := runtime.CreateRun(thread.ID, "read the page", nil)
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	waitForStatus(t, runtime, run.ID, RunWaitingTask)
-	tasks, err := runtime.Tasks(run.ID)
-	if err != nil || len(tasks) != 1 {
-		t.Fatalf("tasks = %+v, err=%v", tasks, err)
-	}
-	if reads.Load() != 0 {
-		t.Fatalf("internet executed before approval")
-	}
-	if _, err := runtime.ResolveTask(tasks[0].ID, tasks[0].WebhookToken, task.Resolution{
-		Decision: task.StateApproved,
-		Actor:    "tester",
-	}); err != nil {
-		t.Fatalf("resolve task: %v", err)
-	}
-	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
-	if !strings.Contains(completed.Answer, "approved content") {
-		t.Fatalf("answer = %q", completed.Answer)
-	}
-	if reads.Load() != 1 {
-		t.Fatalf("internet reads = %d, want 1", reads.Load())
-	}
-}
-
-type stopThenFinishLLM struct {
-	calls   atomic.Int32
-	started chan struct{}
-}
-
-func (c *stopThenFinishLLM) Chat(ctx context.Context, _ llm.ChatRequest) (llm.ChatResponse, error) {
-	if c.calls.Add(1) == 1 {
-		close(c.started)
-		<-ctx.Done()
-		return llm.ChatResponse{}, ctx.Err()
-	}
-	return llm.ChatResponse{Content: `[{"action":"final","content":{"answer":"recovered"}}]`}, nil
-}
-
-func TestRuntimeStopsAndResumesRun(t *testing.T) {
-	model := &stopThenFinishLLM{started: make(chan struct{})}
-	runtime := newTestRuntime(t, model)
-	thread, err := runtime.CreateThread(Manifest{Version: ManifestVersion})
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	run, err := runtime.CreateRun(thread.ID, "long request", nil)
-	if err != nil {
-		t.Fatalf("create run: %v", err)
-	}
-	select {
-	case <-model.started:
-	case <-time.After(5 * time.Second):
-		t.Fatal("llm call did not start")
-	}
-	if _, err := runtime.CreateRun(thread.ID, "conflicting request", nil); !errors.Is(err, ErrConflict) {
-		t.Fatalf("concurrent run error = %v, want conflict", err)
-	}
-	if _, err := runtime.Stop(run.ID); err != nil {
-		t.Fatalf("stop run: %v", err)
-	}
-	waitForStatus(t, runtime, run.ID, RunStopped)
-
-	retried, err := runtime.Retry(run.ID, RetryResume, nil)
-	if err != nil {
-		t.Fatalf("resume run: %v", err)
-	}
-	if retried.Attempt != 2 {
-		t.Fatalf("attempt = %d, want 2", retried.Attempt)
-	}
-	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
-	if completed.Answer != "recovered" {
-		t.Fatalf("answer = %q, want recovered", completed.Answer)
-	}
-}
-
-func newTestRuntime(t *testing.T, model llm.Client) *Runtime {
-	t.Helper()
+	dispatchers := &runtimeDispatchers{}
+	store := newRuntimeStore()
 	runtime, err := NewRuntime(context.Background(), Config{
-		WasmPath: buildGuest(t),
-		LLM:      model,
-		IDSource: sequentialIDs(),
+		Brains: staticBrains{
+			defaultID: "brain@1",
+			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		},
+		Dispatchers:  dispatchers,
+		StateStore:   store,
+		TaskStore:    store,
+		SessionStore: newRuntimeSessions(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
 	})
 	if err != nil {
 		t.Fatalf("new runtime: %v", err)
@@ -341,7 +335,67 @@ func newTestRuntime(t *testing.T, model llm.Client) *Runtime {
 			t.Errorf("close runtime: %v", err)
 		}
 	})
-	return runtime
+	thread, err := runtime.CreateThread(Manifest{
+		Version: ManifestVersion,
+		Capabilities: []CapabilityConfig{{
+			Name: "custom.call", Settings: json.RawMessage(`{"value":1}`),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "finish", []CapabilityConfig{{
+		Name: "custom.call", Settings: json.RawMessage(`{"value":2}`),
+	}})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	waitForStatus(t, runtime, run.ID, RunCompleted)
+	journal, err := runtime.Journal(run.ID)
+	if err != nil {
+		t.Fatalf("load journal: %v", err)
+	}
+	if len(journal) != 1 || journal[0].Call.Name != "llm.chat" {
+		t.Fatalf("journal = %+v", journal)
+	}
+
+	dispatchers.mu.Lock()
+	defer dispatchers.mu.Unlock()
+	if len(dispatchers.manifests) != 1 ||
+		string(dispatchers.manifests[0].Capabilities[0].Settings) != `{"value":2}` {
+		t.Fatalf("dispatcher manifests = %+v", dispatchers.manifests)
+	}
+}
+
+func TestRuntimeRejectsPersistedBrainDigestMismatch(t *testing.T) {
+	store := newRuntimeStore()
+	now := time.Now().UTC()
+	store.state = StoredState{
+		Threads: []StoredThread{{
+			TenantID: "local", ID: "thread", CreatedAt: now, UpdatedAt: now,
+			Manifest: Manifest{Version: ManifestVersion, Brain: "brain@1"},
+		}},
+		Runs: []StoredRun{{
+			TenantID: "local", ID: "run", ThreadID: "thread", Revision: 1,
+			Status: RunCompleted, CreatedAt: now, UpdatedAt: now,
+			EffectiveManifest: Manifest{Version: ManifestVersion, Brain: "brain@1"},
+			BrainDigest:       "different",
+		}},
+	}
+	_, err := NewRuntime(context.Background(), Config{
+		Brains: staticBrains{
+			defaultID: "brain@1",
+			sources:   []BrainSource{{ID: "brain@1", Wasm: []byte("wasm")}},
+		},
+		Dispatchers:  &runtimeDispatchers{},
+		StateStore:   store,
+		TaskStore:    store,
+		SessionStore: newRuntimeSessions(),
+		TaskSecret:   []byte("stable-secret"),
+	})
+	if err == nil {
+		t.Fatal("expected persisted brain digest mismatch")
+	}
 }
 
 func waitForStatus(t *testing.T, runtime *Runtime, runID string, want RunStatus) RunSnapshot {
@@ -355,12 +409,12 @@ func waitForStatus(t *testing.T, runtime *Runtime, runID string, want RunStatus)
 		if run.Status == want {
 			return run
 		}
-		if run.Status == RunFailed && want != RunFailed {
+		if run.Status == RunFailed {
 			t.Fatalf("run failed: %s", run.Error)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("run %s did not reach %s", runID, want)
+	t.Fatalf("run did not reach %s", want)
 	return RunSnapshot{}
 }
 
@@ -371,16 +425,12 @@ func sequentialIDs() func(string) (string, error) {
 	}
 }
 
-func buildGuest(t *testing.T) string {
+func buildBrain(t *testing.T) []byte {
 	t.Helper()
-	if _, err := exec.LookPath("tinygo"); err != nil {
-		t.Skip("tinygo not found")
-	}
 	wasmPath := filepath.Join(t.TempDir(), "agent.wasm")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx,
-		"tinygo", "build",
+	cmd := exec.CommandContext(ctx, "tinygo", "build",
 		"-target", "wasip1",
 		"-buildmode=c-shared",
 		"-tags", "tinygo",
@@ -392,9 +442,12 @@ func buildGuest(t *testing.T) string {
 		"XDG_CACHE_HOME="+t.TempDir(),
 		"GOCACHE="+filepath.Join(t.TempDir(), "go-build"),
 	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("build guest: %v\n%s", err, strings.TrimSpace(string(out)))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build brain: %v\n%s", err, out)
 	}
-	return wasmPath
+	raw, err := os.ReadFile(wasmPath)
+	if err != nil {
+		t.Fatalf("read brain: %v", err)
+	}
+	return raw
 }

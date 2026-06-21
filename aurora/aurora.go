@@ -10,18 +10,10 @@ func NewRuntime(ctx context.Context, config Config) (Runtime, error) {
 	return agent.NewRuntime(ctx, config)
 }
 
-func NewBrainRegistry(defaultID string, paths map[string]string) (*BrainRegistry, error) {
-	return agent.NewBrainRegistry(defaultID, paths)
+func ValidateManifest(m Manifest, provider DispatcherProvider) (Manifest, error) {
+	return agent.ValidateManifest(m, provider)
 }
 
-func SingleBrainRegistry(path string) (*BrainRegistry, error) {
-	return agent.SingleBrainRegistry(path)
-}
-
-func DefaultManifest(allowlist string) (Manifest, error) {
-	return agent.DefaultManifest(allowlist)
-}
-
-func ValidateManifest(m Manifest) (Manifest, error) {
-	return agent.ValidateManifest(m)
+func EffectiveManifest(base Manifest, overrides []CapabilityConfig, provider DispatcherProvider) (Manifest, error) {
+	return agent.EffectiveManifest(base, overrides, provider)
 }

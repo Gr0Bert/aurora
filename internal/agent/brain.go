@@ -1,69 +1,78 @@
 package agent
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 )
 
 const DefaultBrainID = "aurora-default@1"
 
+type BrainSource struct {
+	ID   string
+	Wasm []byte
+}
+
 type BrainArtifact struct {
 	ID     string `json:"id"`
-	Path   string `json:"path"`
 	Digest string `json:"digest"`
 }
 
-type BrainRegistry struct {
+type BrainProvider interface {
+	DefaultID() string
+	List(context.Context) ([]BrainSource, error)
+}
+
+type loadedBrains struct {
 	defaultID string
+	sources   map[string]BrainSource
 	artifacts map[string]BrainArtifact
 }
 
-func NewBrainRegistry(defaultID string, paths map[string]string) (*BrainRegistry, error) {
-	defaultID = strings.TrimSpace(defaultID)
+func loadBrains(ctx context.Context, provider BrainProvider) (*loadedBrains, error) {
+	if provider == nil {
+		return nil, fmt.Errorf("%w: brain provider is required", ErrInvalid)
+	}
+	defaultID := strings.TrimSpace(provider.DefaultID())
 	if defaultID == "" {
-		defaultID = DefaultBrainID
+		return nil, fmt.Errorf("%w: default brain id is required", ErrInvalid)
 	}
-	registry := &BrainRegistry{defaultID: defaultID, artifacts: make(map[string]BrainArtifact)}
-	for id, path := range paths {
-		id = strings.TrimSpace(id)
-		path = strings.TrimSpace(path)
-		if id == "" || path == "" {
-			return nil, fmt.Errorf("%w: brain id and path are required", ErrInvalid)
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read brain %q: %w", id, err)
-		}
-		sum := sha256.Sum256(raw)
-		registry.artifacts[id] = BrainArtifact{
-			ID: id, Path: path, Digest: hex.EncodeToString(sum[:]),
-		}
+	list, err := provider.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list brains: %w", err)
 	}
-	if _, ok := registry.artifacts[defaultID]; !ok {
+	loaded := &loadedBrains{
+		defaultID: defaultID,
+		sources:   make(map[string]BrainSource, len(list)),
+		artifacts: make(map[string]BrainArtifact, len(list)),
+	}
+	for _, source := range list {
+		id := strings.TrimSpace(source.ID)
+		if id == "" || len(source.Wasm) == 0 {
+			return nil, fmt.Errorf("%w: brain id and wasm bytes are required", ErrInvalid)
+		}
+		if _, exists := loaded.sources[id]; exists {
+			return nil, fmt.Errorf("%w: duplicate brain %q", ErrInvalid, id)
+		}
+		wasm := append([]byte(nil), source.Wasm...)
+		sum := sha256.Sum256(wasm)
+		loaded.sources[id] = BrainSource{ID: id, Wasm: wasm}
+		loaded.artifacts[id] = BrainArtifact{ID: id, Digest: hex.EncodeToString(sum[:])}
+	}
+	if _, ok := loaded.sources[defaultID]; !ok {
 		return nil, fmt.Errorf("%w: default brain %q is not registered", ErrInvalid, defaultID)
 	}
-	return registry, nil
+	return loaded, nil
 }
 
-func SingleBrainRegistry(path string) (*BrainRegistry, error) {
-	return NewBrainRegistry(DefaultBrainID, map[string]string{DefaultBrainID: path})
-}
-
-func (r *BrainRegistry) DefaultID() string {
-	if r == nil {
-		return ""
-	}
+func (r *loadedBrains) DefaultID() string {
 	return r.defaultID
 }
 
-func (r *BrainRegistry) Resolve(id string) (BrainArtifact, error) {
-	if r == nil {
-		return BrainArtifact{}, fmt.Errorf("%w: brain registry is required", ErrInvalid)
-	}
+func (r *loadedBrains) Resolve(id string) (BrainArtifact, error) {
 	if strings.TrimSpace(id) == "" {
 		id = r.defaultID
 	}
@@ -74,10 +83,19 @@ func (r *BrainRegistry) Resolve(id string) (BrainArtifact, error) {
 	return artifact, nil
 }
 
-func (r *BrainRegistry) List() []BrainArtifact {
-	if r == nil {
-		return nil
+func (r *loadedBrains) Source(id string) (BrainSource, error) {
+	if strings.TrimSpace(id) == "" {
+		id = r.defaultID
 	}
+	source, ok := r.sources[id]
+	if !ok {
+		return BrainSource{}, fmt.Errorf("%w: brain %q is not registered", ErrInvalid, id)
+	}
+	source.Wasm = append([]byte(nil), source.Wasm...)
+	return source, nil
+}
+
+func (r *loadedBrains) List() []BrainArtifact {
 	out := make([]BrainArtifact, 0, len(r.artifacts))
 	for _, artifact := range r.artifacts {
 		out = append(out, artifact)

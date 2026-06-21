@@ -1,79 +1,82 @@
 package agent
 
 import (
+	"context"
 	"encoding/json"
-	"strings"
+	"fmt"
 	"testing"
+
+	"capcompute/dispatcher"
 )
 
-func TestEffectiveManifestReplacesAndAddsSupportedCapabilities(t *testing.T) {
-	baseSettings := json.RawMessage(`{"allow":["https://go.dev"]}`)
-	overrideSettings := json.RawMessage(`{"allow":["*"],"timeout_ms":2000,"max_response_bytes":1024}`)
-	base, err := ValidateManifest(Manifest{
-		Version:      ManifestVersion,
-		SystemPrompt: "research carefully",
-		Capabilities: []CapabilityConfig{{Name: "internet.read", Settings: baseSettings}},
-	})
-	if err != nil {
-		t.Fatalf("validate base: %v", err)
-	}
-
-	effective, err := EffectiveManifest(base, []CapabilityConfig{{
-		Name: "internet.read", Settings: overrideSettings,
-	}})
-	if err != nil {
-		t.Fatalf("effective manifest: %v", err)
-	}
-	config, err := DispatcherConfig(effective, &finalLLM{})
-	if err != nil {
-		t.Fatalf("dispatcher config: %v", err)
-	}
-	if len(config.Capabilities) != 1 || config.Capabilities[0].Name != "internet.read" {
-		t.Fatalf("capabilities = %+v", config.Capabilities)
-	}
-	if !strings.Contains(config.Capabilities[0].Description, "*") {
-		t.Fatalf("description does not expose effective wildcard policy: %q", config.Capabilities[0].Description)
-	}
+type testDispatchers struct {
+	normalized []string
 }
 
-func TestManifestRejectsUnknownCapability(t *testing.T) {
-	_, err := ValidateManifest(Manifest{
-		Version: ManifestVersion,
-		Capabilities: []CapabilityConfig{{
-			Name: "shell.exec",
-		}},
-	})
-	if err == nil || !strings.Contains(err.Error(), "unsupported dispatcher") {
-		t.Fatalf("error = %v", err)
+func (p *testDispatchers) Normalize(name string, settings json.RawMessage) (json.RawMessage, error) {
+	if name == "unknown" {
+		return nil, fmt.Errorf("unsupported capability")
 	}
+	p.normalized = append(p.normalized, name)
+	if len(settings) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), settings...), nil
 }
 
-func TestLegacyManifestIsNormalizedToVersionTwo(t *testing.T) {
+func (*testDispatchers) NewDispatcher(context.Context, RunContext, Manifest) (dispatcher.Dispatcher[RunContext], error) {
+	return nil, nil
+}
+
+func TestValidateManifestUsesInjectedProvider(t *testing.T) {
+	provider := &testDispatchers{}
 	manifest, err := ValidateManifest(Manifest{
 		Version: LegacyManifestVersion,
 		Capabilities: []CapabilityConfig{{
-			Name: "internet.read", Settings: json.RawMessage(`{"allow":["*"]}`),
+			Name: " custom.call ",
 		}},
-	})
+	}, provider)
 	if err != nil {
-		t.Fatalf("validate legacy manifest: %v", err)
+		t.Fatalf("validate: %v", err)
 	}
-	if manifest.Version != ManifestVersion {
-		t.Fatalf("version = %d, want %d", manifest.Version, ManifestVersion)
+	if manifest.Version != ManifestVersion || manifest.Capabilities[0].Name != "custom.call" {
+		t.Fatalf("manifest = %+v", manifest)
+	}
+	if string(manifest.Capabilities[0].Settings) != "{}" {
+		t.Fatalf("settings = %s", manifest.Capabilities[0].Settings)
 	}
 }
 
-func TestManifestAcceptsRegisteredMCPReferenceShape(t *testing.T) {
-	manifest, err := ValidateManifest(Manifest{
-		Version: ManifestVersion,
-		Capabilities: []CapabilityConfig{{
-			Name: "mcp.docs", Settings: json.RawMessage(`{"tools":["search"]}`),
+func TestEffectiveManifestNormalizesReplacementsAndAdditions(t *testing.T) {
+	provider := &testDispatchers{}
+	effective, err := EffectiveManifest(
+		Manifest{Version: ManifestVersion, Brain: "brain@1", Capabilities: []CapabilityConfig{
+			{Name: "one", Settings: json.RawMessage(`{"value":1}`)},
 		}},
-	})
+		[]CapabilityConfig{
+			{Name: "one", Settings: json.RawMessage(`{"value":2}`)},
+			{Name: "two"},
+		},
+		provider,
+	)
 	if err != nil {
-		t.Fatalf("validate MCP manifest: %v", err)
+		t.Fatalf("effective manifest: %v", err)
 	}
-	if !strings.Contains(string(manifest.Capabilities[0].Settings), `"server_id":"docs"`) {
-		t.Fatalf("settings = %s", manifest.Capabilities[0].Settings)
+	if len(effective.Capabilities) != 2 ||
+		string(effective.Capabilities[0].Settings) != `{"value":2}` ||
+		string(effective.Capabilities[1].Settings) != `{}` {
+		t.Fatalf("effective capabilities = %+v", effective.Capabilities)
+	}
+}
+
+func TestValidateManifestRejectsMissingProviderAndUnknownCapability(t *testing.T) {
+	if _, err := ValidateManifest(Manifest{Version: ManifestVersion}, nil); err == nil {
+		t.Fatal("expected missing provider error")
+	}
+	if _, err := ValidateManifest(Manifest{
+		Version:      ManifestVersion,
+		Capabilities: []CapabilityConfig{{Name: "unknown"}},
+	}, &testDispatchers{}); err == nil {
+		t.Fatal("expected unsupported capability error")
 	}
 }

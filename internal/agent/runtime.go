@@ -18,9 +18,6 @@ import (
 
 	internalhost "aurora-capcompute/internal/host"
 	"aurora-capcompute/internal/task"
-	"aurora-dispatchers/llm"
-	"aurora-dispatchers/mcp"
-	dispatcherregistry "aurora-dispatchers/registry"
 
 	extism "github.com/extism/go-sdk"
 )
@@ -60,28 +57,28 @@ type HistoryMessage struct {
 }
 
 type Config struct {
-	WasmPath           string
-	LLM                llm.Client
-	IDSource           func(prefix string) (string, error)
-	Now                func() time.Time
-	EventSize          int
-	TenantID           string
-	Store              Store
-	TaskSecret         []byte
-	TaskTTL            time.Duration
-	Brains             *BrainRegistry
-	MCPServers         map[string]mcp.ServerConfig
-	InstanceID         string
-	LeaseTTL           time.Duration
-	DispatcherRegistry *dispatcherregistry.Registry
+	Brains       BrainProvider
+	Dispatchers  DispatcherProvider
+	StateStore   StateStore
+	TaskStore    TaskStore
+	SessionStore capcompute.SessionStore[string, RunKey]
+	IDSource     func(prefix string) (string, error)
+	Now          func() time.Time
+	EventSize    int
+	TenantID     string
+	TaskSecret   []byte
+	TaskTTL      time.Duration
+	InstanceID   string
+	LeaseTTL     time.Duration
 }
 
 type Runtime struct {
 	mu                sync.Mutex
 	computes          map[string]*capcompute.ComputeCompiledPlugin[string, RunKey]
-	brains            *BrainRegistry
+	brains            *loadedBrains
 	sessionStore      capcompute.SessionStore[string, RunKey]
-	persistence       Store
+	stateStore        StateStore
+	taskStore         TaskStore
 	tenantID          string
 	threads           map[string]*threadState
 	runs              map[string]*runState
@@ -94,7 +91,7 @@ type Runtime struct {
 	taskTTL           time.Duration
 	instanceID        string
 	leaseTTL          time.Duration
-	dispatchers       *dispatcherregistry.Registry
+	dispatchers       DispatcherProvider
 	dispatcherFactory internalhost.Factory[RunKey]
 	wg                sync.WaitGroup
 	closed            bool
@@ -219,25 +216,31 @@ type JournalEvent struct {
 }
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
-	if config.WasmPath == "" && config.Brains == nil {
-		return nil, fmt.Errorf("%w: wasm path is required", ErrInvalid)
+	if config.Dispatchers == nil {
+		return nil, fmt.Errorf("%w: dispatcher provider is required", ErrInvalid)
 	}
-	if config.LLM == nil {
-		return nil, fmt.Errorf("%w: llm client is required", ErrInvalid)
+	if config.StateStore == nil {
+		return nil, fmt.Errorf("%w: state store is required", ErrInvalid)
 	}
-	brains := config.Brains
-	if brains == nil {
-		var err error
-		brains, err = SingleBrainRegistry(config.WasmPath)
-		if err != nil {
-			return nil, err
-		}
+	if config.TaskStore == nil {
+		return nil, fmt.Errorf("%w: task store is required", ErrInvalid)
+	}
+	if config.SessionStore == nil {
+		return nil, fmt.Errorf("%w: session store is required", ErrInvalid)
+	}
+	if len(config.TaskSecret) == 0 {
+		return nil, fmt.Errorf("%w: task secret is required", ErrInvalid)
+	}
+	brains, err := loadBrains(ctx, config.Brains)
+	if err != nil {
+		return nil, err
 	}
 	runtime := &Runtime{
 		computes:     make(map[string]*capcompute.ComputeCompiledPlugin[string, RunKey]),
 		brains:       brains,
-		sessionStore: newInMemorySessionStore[string, RunKey](),
-		persistence:  config.Store,
+		sessionStore: config.SessionStore,
+		stateStore:   config.StateStore,
+		taskStore:    config.TaskStore,
 		tenantID:     strings.TrimSpace(config.TenantID),
 		threads:      make(map[string]*threadState),
 		runs:         make(map[string]*runState),
@@ -249,13 +252,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		taskTTL:      config.TaskTTL,
 		instanceID:   strings.TrimSpace(config.InstanceID),
 		leaseTTL:     config.LeaseTTL,
-		dispatchers:  config.DispatcherRegistry,
-	}
-	if runtime.persistence == nil {
-		runtime.persistence = NewMemoryStore()
-	}
-	if runtime.dispatchers == nil {
-		runtime.dispatchers = dispatcherregistry.Default()
+		dispatchers:  config.Dispatchers,
 	}
 	if runtime.tenantID == "" {
 		runtime.tenantID = DefaultTenantID
@@ -268,9 +265,6 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	if runtime.eventSize <= 0 {
 		runtime.eventSize = 32
-	}
-	if len(runtime.taskSecret) == 0 {
-		runtime.taskSecret = []byte("aurora-local-development-webhook-secret")
 	}
 	if runtime.taskTTL <= 0 {
 		runtime.taskTTL = 24 * time.Hour
@@ -290,7 +284,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 
 	dispatcherFactory := internalhost.Factory[RunKey]{
-		Resolve: func(resolveCtx context.Context, key RunKey) (internalhost.Config, error) {
+		Base: func(resolveCtx context.Context, key RunKey) (dispatcher.Dispatcher[RunKey], error) {
 			runtime.mu.Lock()
 			run := runtime.runs[key.RunID]
 			var manifest Manifest
@@ -299,16 +293,14 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			}
 			runtime.mu.Unlock()
 			if run == nil {
-				return internalhost.Config{}, fmt.Errorf("%w: run %s", ErrNotFound, key.RunID)
+				return nil, fmt.Errorf("%w: run %s", ErrNotFound, key.RunID)
 			}
-			return dispatcherConfigWithRegistry(
-				resolveCtx, manifest, config.LLM, config.MCPServers, runtime.dispatchers,
-			)
+			return runtime.dispatchers.NewDispatcher(resolveCtx, key, manifest)
 		},
 		NewJournal: func(_ context.Context, key RunKey) (journaled.Journal, error) {
-			return runtime.persistence.OpenJournal(context.Background(), key)
+			return runtime.stateStore.OpenJournal(context.Background(), key)
 		},
-		Tasks:      runtime.persistence,
+		Tasks:      runtime.taskStore,
 		TaskSecret: runtime.taskSecret,
 		TaskTTL:    runtime.taskTTL,
 		TaskScope: func(key RunKey) task.Scope {
@@ -328,9 +320,15 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 	}
 	runtime.dispatcherFactory = dispatcherFactory
 	for _, artifact := range brains.List() {
+		source, err := brains.Source(artifact.ID)
+		if err != nil {
+			return nil, err
+		}
 		compute, err := capcompute.NewComputeCompiledPlugin[string, RunKey](ctx, capcompute.Config[string, RunKey]{
 			Manifest: extism.Manifest{
-				Wasm: []extism.Wasm{extism.WasmFile{Path: artifact.Path}},
+				Wasm: []extism.Wasm{extism.WasmData{
+					Data: source.Wasm, Hash: artifact.Digest, Name: artifact.ID,
+				}},
 			},
 			PluginConfig: extism.PluginConfig{EnableWasi: true},
 			SessionStore: runtime.sessionStore,
@@ -350,7 +348,7 @@ func (r *Runtime) CreateThread(manifest Manifest) (ThreadSnapshot, error) {
 	if strings.TrimSpace(manifest.Brain) == "" {
 		manifest.Brain = r.brains.DefaultID()
 	}
-	manifest, err := validateManifestWithRegistry(manifest, r.dispatchers)
+	manifest, err := ValidateManifest(manifest, r.dispatchers)
 	if err != nil {
 		return ThreadSnapshot{}, err
 	}
@@ -369,7 +367,7 @@ func (r *Runtime) CreateThread(manifest Manifest) (ThreadSnapshot, error) {
 	if r.closed {
 		return ThreadSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	if err := r.persistence.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
+	if err := r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
 		return ThreadSnapshot{}, err
 	}
 	r.threads[id] = thread
@@ -424,7 +422,7 @@ func (r *Runtime) CreateRun(threadID string, message string, overrides []Capabil
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
 	}
-	effectiveManifest, err := effectiveManifestWithRegistry(thread.manifest, overrides, r.dispatchers)
+	effectiveManifest, err := EffectiveManifest(thread.manifest, overrides, r.dispatchers)
 	if err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err
@@ -459,14 +457,14 @@ func (r *Runtime) CreateRun(threadID string, message string, overrides []Capabil
 	}
 	thread.activeRunID = runID
 	thread.updatedAt = now
-	if err := r.persistence.SaveRun(context.Background(), r.storedRunLocked(run)); err != nil {
+	if err := r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run)); err != nil {
 		delete(r.runs, runID)
 		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
 		thread.activeRunID = ""
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}
-	if err := r.persistence.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
+	if err := r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
 		delete(r.runs, runID)
 		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
 		thread.activeRunID = ""
@@ -530,7 +528,7 @@ func (r *Runtime) Tasks(runID string) ([]TaskSnapshot, error) {
 	if run == nil {
 		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
 	}
-	records, err := r.persistence.List(context.Background(), r.tenantID, runID)
+	records, err := r.taskStore.List(context.Background(), r.tenantID, runID)
 	if err != nil {
 		return nil, err
 	}
@@ -550,7 +548,7 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	if resolution.Decision == task.StateCompleted && !json.Valid(resolution.Data) {
 		return TaskSnapshot{}, fmt.Errorf("%w: completed task data must be valid JSON", ErrInvalid)
 	}
-	acquired, err := r.persistence.AcquireLease(
+	acquired, err := r.stateStore.AcquireLease(
 		context.Background(), r.tenantID, "task", taskID,
 		r.instanceID, r.now().UTC(), time.Minute,
 	)
@@ -560,10 +558,10 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	if !acquired {
 		return TaskSnapshot{}, fmt.Errorf("%w: task is being resolved", ErrConflict)
 	}
-	defer r.persistence.ReleaseLease(context.Background(), r.tenantID, "task", taskID, r.instanceID)
+	defer r.stateStore.ReleaseLease(context.Background(), r.tenantID, "task", taskID, r.instanceID)
 
 	sum := sha256.Sum256([]byte(token))
-	record, err := r.persistence.Resolve(
+	record, err := r.taskStore.Resolve(
 		context.Background(), r.tenantID, taskID, sum[:], resolution, r.now().UTC(),
 	)
 	if err != nil {
@@ -612,9 +610,9 @@ func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
 		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot be stopped from %s", ErrConflict, runID, run.status)
 	}
 	snapshot := r.runSnapshotLocked(run)
-	_ = r.persistence.SaveRun(context.Background(), r.storedRunLocked(run))
+	_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run))
 	if thread := r.threads[run.threadID]; thread != nil {
-		_ = r.persistence.SaveThread(context.Background(), r.storedThreadLocked(thread))
+		_ = r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread))
 	}
 	r.mu.Unlock()
 	if closeSession != nil {
@@ -657,7 +655,7 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 	}
 	var replacementManifest *Manifest
 	if len(overrides) > 0 {
-		effective, err := effectiveManifestWithRegistry(thread.manifest, overrides, r.dispatchers)
+		effective, err := EffectiveManifest(thread.manifest, overrides, r.dispatchers)
 		if err != nil {
 			r.mu.Unlock()
 			return RunSnapshot{}, err
@@ -667,7 +665,7 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 	if mode == RetryRestart {
 		run.revision++
 		scope := r.runContextLocked(run)
-		if err := r.persistence.ResetJournal(context.Background(), scope); err != nil {
+		if err := r.stateStore.ResetJournal(context.Background(), scope); err != nil {
 			r.mu.Unlock()
 			return RunSnapshot{}, err
 		}
@@ -694,11 +692,11 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 	run.updatedAt = r.now().UTC()
 	thread.activeRunID = run.id
 	thread.updatedAt = run.updatedAt
-	if err := r.persistence.SaveRun(context.Background(), r.storedRunLocked(run)); err != nil {
+	if err := r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run)); err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}
-	if err := r.persistence.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
+	if err := r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}
@@ -779,7 +777,7 @@ func (r *Runtime) Close(ctx context.Context) error {
 	for _, session := range sessions {
 		_ = session.Close(context.Background())
 	}
-	closeErrors := []error{r.persistence.Close()}
+	closeErrors := []error{}
 	for _, compute := range r.computes {
 		closeErrors = append(closeErrors, compute.CloseCompiled(context.Background()))
 	}
@@ -804,7 +802,7 @@ func (r *Runtime) execute(runID string) {
 		return
 	}
 	leaseResource := fmt.Sprintf("%s/%d", run.id, run.revision)
-	acquired, leaseErr := r.persistence.AcquireLease(
+	acquired, leaseErr := r.stateStore.AcquireLease(
 		context.Background(), r.tenantID, "run", leaseResource,
 		r.instanceID, r.now().UTC(), r.leaseTTL,
 	)
@@ -814,9 +812,9 @@ func (r *Runtime) execute(runID string) {
 			err = errors.New("run is leased by another Aurora instance")
 		}
 		r.finishLocked(run, RunInterrupted, "", err)
-		_ = r.persistence.SaveRun(context.Background(), r.storedRunLocked(run))
+		_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run))
 		if thread := r.threads[run.threadID]; thread != nil {
-			_ = r.persistence.SaveThread(context.Background(), r.storedThreadLocked(thread))
+			_ = r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread))
 		}
 		snapshot := r.runSnapshotLocked(run)
 		threadID := run.threadID
@@ -824,7 +822,7 @@ func (r *Runtime) execute(runID string) {
 		r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
 		return
 	}
-	defer r.persistence.ReleaseLease(
+	defer r.stateStore.ReleaseLease(
 		context.Background(), r.tenantID, "run", leaseResource, r.instanceID,
 	)
 	session := run.session
@@ -894,7 +892,7 @@ func (r *Runtime) execute(runID string) {
 	run.updatedAt = now
 	snapshot := r.runSnapshotLocked(run)
 	threadID := run.threadID
-	_ = r.persistence.SaveRun(context.Background(), r.storedRunLocked(run))
+	_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run))
 	r.mu.Unlock()
 	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
 
@@ -926,7 +924,7 @@ func (r *Runtime) execute(runID string) {
 		}
 		r.finish(runID, RunCompleted, output.Answer, nil)
 	case capcompute.PlayYielded:
-		tasks, taskErr := r.persistence.List(context.Background(), r.tenantID, runID)
+		tasks, taskErr := r.taskStore.List(context.Background(), r.tenantID, runID)
 		if taskErr == nil && hasPendingTask(tasks) {
 			r.finish(runID, RunWaitingTask, "", nil)
 		} else {
@@ -954,11 +952,11 @@ func (r *Runtime) finish(runID string, status RunStatus, answer string, err erro
 		return
 	}
 	r.finishLocked(run, status, answer, err)
-	_ = r.persistence.SaveRun(context.Background(), r.storedRunLocked(run))
+	_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run))
 	if thread := r.threads[run.threadID]; thread != nil {
-		_ = r.persistence.SaveThread(context.Background(), r.storedThreadLocked(thread))
+		_ = r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread))
 		if status == RunCompleted {
-			_ = r.persistence.AppendMessages(context.Background(), r.tenantID, thread.id, []HistoryMessage{
+			_ = r.stateStore.AppendMessages(context.Background(), r.tenantID, thread.id, []HistoryMessage{
 				{Role: "user", Content: run.message},
 				{Role: "assistant", Content: answer},
 			})
@@ -998,7 +996,7 @@ func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, e
 }
 
 func (r *Runtime) newJournal(run *runState) (journaled.Journal, error) {
-	journal, err := r.persistence.OpenJournal(context.Background(), r.runContextLocked(run))
+	journal, err := r.stateStore.OpenJournal(context.Background(), r.runContextLocked(run))
 	if err != nil {
 		return nil, err
 	}
@@ -1122,7 +1120,7 @@ func copyTime(value *time.Time) *time.Time {
 }
 
 func (r *Runtime) restore(ctx context.Context) error {
-	state, err := r.persistence.Load(ctx, r.tenantID)
+	state, err := r.stateStore.Load(ctx, r.tenantID)
 	if err != nil {
 		return err
 	}
@@ -1130,7 +1128,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if stored.Manifest.Brain == "" {
 			stored.Manifest.Brain = r.brains.DefaultID()
 		}
-		stored.Manifest, err = validateManifestWithRegistry(stored.Manifest, r.dispatchers)
+		stored.Manifest, err = ValidateManifest(stored.Manifest, r.dispatchers)
 		if err != nil {
 			return err
 		}
@@ -1167,7 +1165,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if stored.EffectiveManifest.Brain == "" {
 			stored.EffectiveManifest.Brain = r.brains.DefaultID()
 		}
-		stored.EffectiveManifest, err = validateManifestWithRegistry(stored.EffectiveManifest, r.dispatchers)
+		stored.EffectiveManifest, err = ValidateManifest(stored.EffectiveManifest, r.dispatchers)
 		if err != nil {
 			return err
 		}
@@ -1215,7 +1213,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 			thread.runIDs = append(thread.runIDs, run.id)
 		}
 		if status != stored.Status {
-			if err := r.persistence.SaveRun(ctx, r.storedRunLocked(run)); err != nil {
+			if err := r.stateStore.SaveRun(ctx, r.storedRunLocked(run)); err != nil {
 				return err
 			}
 		}

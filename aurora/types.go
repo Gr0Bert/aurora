@@ -47,11 +47,14 @@ const (
 // Construction
 
 type Config = agent.Config
-type BrainRegistry = agent.BrainRegistry
+type BrainSource = agent.BrainSource
+type BrainProvider = agent.BrainProvider
+type DispatcherProvider = agent.DispatcherProvider
 
 // Store interface and its type surface
 
 type Store = agent.Store
+type StateStore = agent.StateStore
 type StoredState = agent.StoredState
 type StoredThread = agent.StoredThread
 type StoredRun = agent.StoredRun
@@ -64,7 +67,7 @@ type TaskScope = task.Scope
 type TaskRecord = task.Record
 type TaskState = task.State
 type Resolution = resolution.Resolution
-type TaskStore = task.Store
+type TaskStore = agent.TaskStore
 
 const (
 	TaskStatePending   = task.StatePending
@@ -98,8 +101,3 @@ const (
 	ManifestVersion       = agent.ManifestVersion
 	LegacyManifestVersion = agent.LegacyManifestVersion
 )
-
-// Re-exported type aliases from dispatchers
-
-type InternetSettings = agent.InternetSettings
-type MCPSettings = agent.MCPSettings
