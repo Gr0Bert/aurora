@@ -305,10 +305,11 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			if err != nil {
 				return nil, err
 			}
+			var d dispatcher.Dispatcher[RunKey] = &progressRouter{next: base, runtime: runtime}
 			if len(manifest.Children) > 0 {
-				return newDelegationRouter(base, manifest.Children, runtime, depth), nil
+				d = newDelegationRouter(d, manifest.Children, runtime, depth)
 			}
-			return base, nil
+			return d, nil
 		},
 		NewJournal: func(_ context.Context, key RunKey) (journaled.Journal, error) {
 			runtime.mu.Lock()

@@ -20,6 +20,7 @@ type JournalEntry = agent.JournalEntry
 type JournalOutcome = agent.JournalOutcome
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
+type ProgressEvent = agent.ProgressEvent
 type BrainArtifact = agent.BrainArtifact
 
 // Status types
