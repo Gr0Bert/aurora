@@ -804,6 +804,7 @@ func (r *Runtime) execute(runID string) {
 		r.mu.Unlock()
 		return
 	}
+	slog.Info("execute: starting", "run_id", runID, "depth", run.depth, "brain", run.effectiveManifest.Brain)
 	if run.stopRequested {
 		r.finishLocked(run, RunStopped, "", context.Canceled)
 		snapshot := r.runSnapshotLocked(run)
@@ -922,6 +923,7 @@ func (r *Runtime) execute(runID string) {
 	}
 
 	result := <-handle.Results()
+	slog.Info("execute: play finished", "run_id", runID, "status", result.Status, "err", result.Err)
 	switch result.Status {
 	case capcompute.PlayCompleted:
 		var output agentOutput

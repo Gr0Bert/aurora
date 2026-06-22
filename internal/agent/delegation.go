@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -61,11 +62,13 @@ func (r *delegationRouter) Capabilities() []dispatcher.Capability {
 }
 
 func (c *delegationChild) dispatch(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error) {
+	slog.Info("delegation: dispatch started", "child", c.manifest.Name, "depth", c.depth)
 	maxDepth := c.manifest.MaxDepth
 	if maxDepth == 0 {
 		maxDepth = 1
 	}
 	if c.depth >= maxDepth {
+		slog.Warn("delegation: max depth reached", "child", c.manifest.Name, "depth", c.depth, "max", maxDepth)
 		return dispatcher.Failed("max delegation depth reached"), nil
 	}
 
@@ -73,26 +76,31 @@ func (c *delegationChild) dispatch(ctx context.Context, call dispatcher.Call) (d
 	if err := json.Unmarshal(call.Args, &args); err != nil {
 		return dispatcher.Failed(fmt.Sprintf("decode delegation args: %v", err)), nil
 	}
-	if args.Message == "" {
-		return dispatcher.Failed("message is required"), nil
-	}
+	slog.Info("delegation: creating child", "child", c.manifest.Name, "message_len", len(args.Message))
 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
+	slog.Info("delegation: child manifest built", "brain", childManifest.Brain, "caps", len(childManifest.Capabilities))
 
 	thread, err := c.runtime.CreateThread(childManifest)
 	if err != nil {
+		slog.Error("delegation: create thread failed", "child", c.manifest.Name, "error", err)
 		return dispatcher.Failed(fmt.Sprintf("create child thread: %v", err)), nil
 	}
+	slog.Info("delegation: thread created", "child", c.manifest.Name, "thread_id", thread.ID)
 
 	run, err := c.runtime.createChildRun(thread.ID, args.Message, c.depth+1)
 	if err != nil {
+		slog.Error("delegation: create run failed", "child", c.manifest.Name, "error", err)
 		return dispatcher.Failed(fmt.Sprintf("create child run: %v", err)), nil
 	}
+	slog.Info("delegation: run created, waiting for completion", "child", c.manifest.Name, "run_id", run.ID)
 
 	answer, err := c.runtime.waitForCompletion(ctx, run.ID, thread.ID)
 	if err != nil {
+		slog.Error("delegation: wait failed", "child", c.manifest.Name, "run_id", run.ID, "error", err)
 		return dispatcher.Failed(err.Error()), nil
 	}
+	slog.Info("delegation: completed", "child", c.manifest.Name, "answer_len", len(answer))
 
 	result, marshalErr := json.Marshal(delegateResult{Answer: answer})
 	if marshalErr != nil {
@@ -254,6 +262,7 @@ func (r *Runtime) createChildRun(threadID string, message string, depth int) (Ru
 }
 
 func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string) (string, error) {
+	slog.Info("waitForCompletion: subscribing", "run_id", runID, "thread_id", threadID)
 	_, events, unsubscribe, err := r.Subscribe(threadID)
 	if err != nil {
 		return "", fmt.Errorf("subscribe to child thread: %w", err)
@@ -261,6 +270,7 @@ func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string)
 	defer unsubscribe()
 
 	if snapshot, err := r.GetRun(runID); err == nil {
+		slog.Info("waitForCompletion: initial status", "run_id", runID, "status", snapshot.Status)
 		switch snapshot.Status {
 		case RunCompleted:
 			return snapshot.Answer, nil
@@ -271,34 +281,43 @@ func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string)
 		case RunInterrupted:
 			return "", fmt.Errorf("child run interrupted")
 		}
+	} else {
+		slog.Error("waitForCompletion: GetRun failed", "run_id", runID, "error", err)
 	}
 
 	timeout := 5 * time.Minute
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 
+	slog.Info("waitForCompletion: entering event loop", "run_id", runID, "timeout", timeout)
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Warn("waitForCompletion: context cancelled", "run_id", runID)
 			_, _ = r.Stop(runID)
 			return "", ctx.Err()
 		case <-timer.C:
+			slog.Warn("waitForCompletion: timed out", "run_id", runID)
 			_, _ = r.Stop(runID)
 			return "", fmt.Errorf("child run timed out after %s", timeout)
 		case event, ok := <-events:
 			if !ok {
+				slog.Warn("waitForCompletion: event stream closed", "run_id", runID)
 				return "", fmt.Errorf("child event stream closed")
 			}
+			slog.Info("waitForCompletion: event received", "run_id", runID, "type", event.Type)
 			if event.Type != "run.updated" {
 				continue
 			}
 			snapshot, ok := event.Data.(RunSnapshot)
 			if !ok {
+				slog.Warn("waitForCompletion: event data not RunSnapshot", "run_id", runID, "data_type", fmt.Sprintf("%T", event.Data))
 				continue
 			}
 			if snapshot.ID != runID {
 				continue
 			}
+			slog.Info("waitForCompletion: run status update", "run_id", runID, "status", snapshot.Status, "error", snapshot.Error)
 			switch snapshot.Status {
 			case RunCompleted:
 				return snapshot.Answer, nil
