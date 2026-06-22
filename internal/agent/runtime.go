@@ -116,6 +116,7 @@ type runState struct {
 	history           []HistoryMessage
 	status            RunStatus
 	attempt           int
+	depth             int
 	createdAt         time.Time
 	updatedAt         time.Time
 	startedAt         *time.Time
@@ -289,14 +290,23 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			runtime.mu.Lock()
 			run := runtime.runs[key.RunID]
 			var manifest Manifest
+			var depth int
 			if run != nil {
 				manifest = cloneManifest(run.effectiveManifest)
+				depth = run.depth
 			}
 			runtime.mu.Unlock()
 			if run == nil {
 				return nil, fmt.Errorf("%w: run %s", ErrNotFound, key.RunID)
 			}
-			return runtime.dispatchers.NewDispatcher(resolveCtx, key, manifest)
+			base, err := runtime.dispatchers.NewDispatcher(resolveCtx, key, manifest)
+			if err != nil {
+				return nil, err
+			}
+			if len(manifest.Children) > 0 {
+				return newDelegationRouter(base, manifest.Children, runtime, depth), nil
+			}
+			return base, nil
 		},
 		NewJournal: func(_ context.Context, key RunKey) (journaled.Journal, error) {
 			return runtime.stateStore.OpenJournal(context.Background(), key)
@@ -1193,6 +1203,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 			message:           stored.Message,
 			status:            status,
 			attempt:           stored.Attempt,
+			depth:             stored.Depth,
 			revision:          stored.Revision,
 			createdAt:         stored.CreatedAt,
 			updatedAt:         stored.UpdatedAt,
@@ -1243,6 +1254,7 @@ func (r *Runtime) runContextLocked(run *runState) RunContext {
 		ThreadID: run.threadID,
 		RunID:    run.id,
 		Revision: run.revision,
+		Depth:    run.depth,
 	}
 }
 
@@ -1264,6 +1276,7 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		ID:                run.id,
 		ThreadID:          run.threadID,
 		Revision:          run.revision,
+		Depth:             run.depth,
 		Message:           run.message,
 		Status:            run.status,
 		Attempt:           run.attempt,

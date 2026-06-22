@@ -9,6 +9,7 @@ import (
 // DTOs
 
 type Manifest = agent.Manifest
+type ChildManifest = agent.ChildManifest
 type CapabilityConfig = agent.CapabilityConfig
 type ThreadSummary = agent.ThreadSummary
 type ThreadSnapshot = agent.ThreadSnapshot

@@ -39,6 +39,10 @@ func (p *runtimeDispatchers) NewDispatcher(_ context.Context, _ RunContext, mani
 	return finalDispatcher{}, nil
 }
 
+func (*runtimeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error {
+	return nil
+}
+
 type finalDispatcher struct{}
 
 func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {

@@ -16,6 +16,7 @@ type RunContext struct {
 	ThreadID string `json:"thread_id"`
 	RunID    string `json:"run_id"`
 	Revision uint64 `json:"revision"`
+	Depth    int    `json:"depth,omitempty"`
 }
 
 func (r RunContext) SessionKey() string {
@@ -37,6 +38,7 @@ type StoredRun struct {
 	ID                string
 	ThreadID          string
 	Revision          uint64
+	Depth             int
 	Message           string
 	Status            RunStatus
 	Attempt           int

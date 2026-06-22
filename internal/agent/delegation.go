@@ -1,0 +1,314 @@
+package agent
+
+import (
+	"capcompute/dispatcher"
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+type delegationRouter struct {
+	next     dispatcher.Dispatcher[RunContext]
+	children map[string]delegationChild
+}
+
+type delegationChild struct {
+	manifest ChildManifest
+	runtime  *Runtime
+	depth    int
+}
+
+type delegateArgs struct {
+	Message      string `json:"message"`
+	SystemPrompt string `json:"system_prompt,omitempty"`
+}
+
+type delegateResult struct {
+	Answer string `json:"answer"`
+}
+
+func newDelegationRouter(next dispatcher.Dispatcher[RunContext], children []ChildManifest, runtime *Runtime, depth int) *delegationRouter {
+	m := make(map[string]delegationChild, len(children))
+	for _, child := range children {
+		m[child.Name] = delegationChild{
+			manifest: child,
+			runtime:  runtime,
+			depth:    depth,
+		}
+	}
+	return &delegationRouter{next: next, children: m}
+}
+
+func (r *delegationRouter) Dispatch(ctx context.Context, key RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+	if strings.HasPrefix(call.Name, "call.") {
+		childName := call.Name[len("call."):]
+		child, ok := r.children[childName]
+		if ok {
+			return child.dispatch(ctx, call)
+		}
+	}
+	return r.next.Dispatch(ctx, key, call)
+}
+
+func (r *delegationRouter) Capabilities() []dispatcher.Capability {
+	caps := dispatcher.Capabilities(r.next)
+	for name, child := range r.children {
+		caps = append(caps, delegationCapability(name, child.manifest))
+	}
+	return caps
+}
+
+func (c *delegationChild) dispatch(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error) {
+	maxDepth := c.manifest.MaxDepth
+	if maxDepth == 0 {
+		maxDepth = 1
+	}
+	if c.depth >= maxDepth {
+		return dispatcher.Failed("max delegation depth reached"), nil
+	}
+
+	var args delegateArgs
+	if err := json.Unmarshal(call.Args, &args); err != nil {
+		return dispatcher.Failed(fmt.Sprintf("decode delegation args: %v", err)), nil
+	}
+	if args.Message == "" {
+		return dispatcher.Failed("message is required"), nil
+	}
+
+	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
+
+	thread, err := c.runtime.CreateThread(childManifest)
+	if err != nil {
+		return dispatcher.Failed(fmt.Sprintf("create child thread: %v", err)), nil
+	}
+
+	run, err := c.runtime.createChildRun(thread.ID, args.Message, c.depth+1)
+	if err != nil {
+		return dispatcher.Failed(fmt.Sprintf("create child run: %v", err)), nil
+	}
+
+	answer, err := c.runtime.waitForCompletion(ctx, run.ID, thread.ID)
+	if err != nil {
+		return dispatcher.Failed(err.Error()), nil
+	}
+
+	result, marshalErr := json.Marshal(delegateResult{Answer: answer})
+	if marshalErr != nil {
+		return dispatcher.Outcome{}, marshalErr
+	}
+	return dispatcher.Result(result), nil
+}
+
+func buildChildManifest(child ChildManifest, systemPromptOverride string) Manifest {
+	prompt := child.SystemPrompt
+	if systemPromptOverride != "" {
+		prompt = systemPromptOverride
+	}
+	caps := make([]CapabilityConfig, len(child.Capabilities))
+	for i, cap := range child.Capabilities {
+		caps[i] = CapabilityConfig{
+			Name:     cap.Name,
+			Settings: stripApprovalFromSettings(cap.Settings),
+		}
+	}
+	var children []ChildManifest
+	if len(child.Children) > 0 {
+		children = make([]ChildManifest, len(child.Children))
+		copy(children, child.Children)
+	}
+	return Manifest{
+		Version:      ManifestVersion,
+		Brain:        child.Brain,
+		SystemPrompt: prompt,
+		Capabilities: caps,
+		Children:     children,
+	}
+}
+
+func stripApprovalFromSettings(settings json.RawMessage) json.RawMessage {
+	if len(settings) == 0 {
+		return settings
+	}
+	var parsed map[string]json.RawMessage
+	if json.Unmarshal(settings, &parsed) != nil {
+		return settings
+	}
+	if _, has := parsed["require_approval"]; !has {
+		return settings
+	}
+	delete(parsed, "require_approval")
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return settings
+	}
+	return out
+}
+
+func delegationCapability(name string, child ChildManifest) dispatcher.Capability {
+	var desc strings.Builder
+	desc.WriteString("Delegate work to the ")
+	desc.WriteString(name)
+	desc.WriteString(" brain.")
+	if len(child.Capabilities) > 0 {
+		desc.WriteString(" It can: ")
+		for i, cap := range child.Capabilities {
+			if i > 0 {
+				desc.WriteString(", ")
+			}
+			desc.WriteString(cap.Name)
+		}
+		desc.WriteString(".")
+	} else {
+		desc.WriteString(" Pure computation brain, no external capabilities.")
+	}
+	return dispatcher.Capability{
+		Name:        "call." + name,
+		Description: desc.String(),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string","description":"Task description for the child brain"},"system_prompt":{"type":"string","description":"Optional system prompt override"}},"required":["message"],"additionalProperties":false}`),
+	}
+}
+
+func (r *Runtime) createChildRun(threadID string, message string, depth int) (RunSnapshot, error) {
+	if message == "" {
+		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
+	}
+	runID, err := r.idSource("run_")
+	if err != nil {
+		return RunSnapshot{}, err
+	}
+	now := r.now().UTC()
+
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		return RunSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
+	}
+	thread := r.threads[threadID]
+	if thread == nil {
+		r.mu.Unlock()
+		return RunSnapshot{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
+	}
+	if thread.activeRunID != "" {
+		r.mu.Unlock()
+		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
+	}
+	effectiveManifest, err := EffectiveManifest(thread.manifest, nil, r.dispatchers)
+	if err != nil {
+		r.mu.Unlock()
+		return RunSnapshot{}, err
+	}
+	brain, err := r.brains.Resolve(effectiveManifest.Brain)
+	if err != nil {
+		r.mu.Unlock()
+		return RunSnapshot{}, err
+	}
+	run := &runState{
+		id:                runID,
+		threadID:          threadID,
+		message:           message,
+		history:           append([]HistoryMessage(nil), thread.history...),
+		status:            RunQueued,
+		attempt:           1,
+		depth:             depth,
+		createdAt:         now,
+		updatedAt:         now,
+		effectiveManifest: effectiveManifest,
+		revision:          1,
+		brainDigest:       brain.Digest,
+	}
+	run.journal, err = r.newJournal(run)
+	if err != nil {
+		r.mu.Unlock()
+		return RunSnapshot{}, err
+	}
+	r.runs[runID] = run
+	thread.runIDs = append(thread.runIDs, runID)
+	if len(thread.runIDs) == 1 {
+		thread.title = threadTitle(message)
+	}
+	thread.activeRunID = runID
+	thread.updatedAt = now
+	if err := r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run)); err != nil {
+		delete(r.runs, runID)
+		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
+		thread.activeRunID = ""
+		r.mu.Unlock()
+		return RunSnapshot{}, err
+	}
+	if err := r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread)); err != nil {
+		delete(r.runs, runID)
+		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
+		thread.activeRunID = ""
+		r.mu.Unlock()
+		return RunSnapshot{}, err
+	}
+	snapshot := r.runSnapshotLocked(run)
+	r.mu.Unlock()
+
+	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+	r.wg.Add(1)
+	go r.execute(runID)
+	return snapshot, nil
+}
+
+func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string) (string, error) {
+	_, events, unsubscribe, err := r.Subscribe(threadID)
+	if err != nil {
+		return "", fmt.Errorf("subscribe to child thread: %w", err)
+	}
+	defer unsubscribe()
+
+	if snapshot, err := r.GetRun(runID); err == nil {
+		switch snapshot.Status {
+		case RunCompleted:
+			return snapshot.Answer, nil
+		case RunFailed:
+			return "", fmt.Errorf("child run failed: %s", snapshot.Error)
+		case RunStopped:
+			return "", fmt.Errorf("child run stopped")
+		case RunInterrupted:
+			return "", fmt.Errorf("child run interrupted")
+		}
+	}
+
+	timeout := 5 * time.Minute
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			_, _ = r.Stop(runID)
+			return "", ctx.Err()
+		case <-timer.C:
+			_, _ = r.Stop(runID)
+			return "", fmt.Errorf("child run timed out after %s", timeout)
+		case event, ok := <-events:
+			if !ok {
+				return "", fmt.Errorf("child event stream closed")
+			}
+			if event.Type != "run.updated" {
+				continue
+			}
+			snapshot, ok := event.Data.(RunSnapshot)
+			if !ok {
+				continue
+			}
+			if snapshot.ID != runID {
+				continue
+			}
+			switch snapshot.Status {
+			case RunCompleted:
+				return snapshot.Answer, nil
+			case RunFailed:
+				return "", fmt.Errorf("child run failed: %s", snapshot.Error)
+			case RunStopped:
+				return "", fmt.Errorf("child run stopped")
+			case RunInterrupted:
+				return "", fmt.Errorf("child run interrupted")
+			}
+		}
+	}
+}

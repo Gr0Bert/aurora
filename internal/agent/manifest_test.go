@@ -28,6 +28,10 @@ func (*testDispatchers) NewDispatcher(context.Context, RunContext, Manifest) (di
 	return nil, nil
 }
 
+func (*testDispatchers) IsSubset(name string, parent, child json.RawMessage) error {
+	return nil
+}
+
 func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	provider := &testDispatchers{}
 	manifest, err := ValidateManifest(Manifest{
