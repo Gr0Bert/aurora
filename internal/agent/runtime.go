@@ -311,6 +311,12 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			return base, nil
 		},
 		NewJournal: func(_ context.Context, key RunKey) (journaled.Journal, error) {
+			runtime.mu.Lock()
+			run := runtime.runs[key.RunID]
+			runtime.mu.Unlock()
+			if run != nil && run.journal != nil {
+				return run.journal, nil
+			}
 			return runtime.stateStore.OpenJournal(context.Background(), key)
 		},
 		Tasks:      runtime.taskStore,
