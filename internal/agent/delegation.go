@@ -118,7 +118,7 @@ func buildChildManifest(child ChildManifest, systemPromptOverride string) Manife
 	for i, cap := range child.Capabilities {
 		caps[i] = CapabilityConfig{
 			Name:     cap.Name,
-			Settings: stripApprovalFromSettings(cap.Settings),
+			Settings: disableApprovalInSettings(cap.Settings),
 		}
 	}
 	var children []ChildManifest
@@ -135,18 +135,15 @@ func buildChildManifest(child ChildManifest, systemPromptOverride string) Manife
 	}
 }
 
-func stripApprovalFromSettings(settings json.RawMessage) json.RawMessage {
+func disableApprovalInSettings(settings json.RawMessage) json.RawMessage {
 	if len(settings) == 0 {
-		return settings
+		return json.RawMessage(`{"require_approval":false}`)
 	}
 	var parsed map[string]json.RawMessage
 	if json.Unmarshal(settings, &parsed) != nil {
 		return settings
 	}
-	if _, has := parsed["require_approval"]; !has {
-		return settings
-	}
-	delete(parsed, "require_approval")
+	parsed["require_approval"] = json.RawMessage(`false`)
 	out, err := json.Marshal(parsed)
 	if err != nil {
 		return settings
