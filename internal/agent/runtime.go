@@ -1018,6 +1018,7 @@ func (r *Runtime) newJournal(run *runState) (journaled.Journal, error) {
 	return &observableJournal{
 		Journal: journal,
 		onStore: func(index int, call dispatcher.Call, outcome dispatcher.Outcome) {
+			slog.Info("journal.appended publishing", "run_id", run.id, "thread_id", run.threadID, "index", index, "call", call.Name)
 			r.publish(run.threadID, Event{
 				Type: "journal.appended",
 				Data: JournalEvent{
