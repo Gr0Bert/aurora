@@ -46,11 +46,11 @@ func (*runtimeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error {
 type finalDispatcher struct{}
 
 func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
-	if call.Name != "llm.chat" {
+	if call.Name != "openai.chat" {
 		return dispatcher.Failed("unsupported call: " + call.Name), nil
 	}
 	return dispatcher.Result(json.RawMessage(
-		`{"content":"{\"actions\":[{\"action\":\"final\",\"content\":{\"answer\":\"done\"}}]}"}`,
+		`{"choices":[{"message":{"content":"{\"actions\":[{\"action\":\"final\",\"content\":{\"answer\":\"done\"}}]}"}}]}`,
 	)), nil
 }
 
@@ -359,7 +359,7 @@ func TestRuntimePassesEffectiveManifestToDispatcherProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load journal: %v", err)
 	}
-	if len(journal) != 1 || journal[0].Call.Name != "llm.chat" {
+	if len(journal) != 1 || journal[0].Call.Name != "openai.chat" {
 		t.Fatalf("journal = %+v", journal)
 	}
 

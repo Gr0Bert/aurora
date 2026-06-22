@@ -869,7 +869,7 @@ func (r *Runtime) execute(runID string) {
 				Message:      run.message,
 				History:      run.history,
 				SystemPrompt: run.effectiveManifest.SystemPrompt,
-				Capabilities: session.Capabilities(),
+				Capabilities: visibleCapabilities(session.Capabilities(), run.effectiveManifest),
 			})
 			if err == nil {
 				session.Input = input
@@ -1242,6 +1242,22 @@ func (r *Runtime) restore(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func visibleCapabilities(caps []dispatcher.Capability, manifest Manifest) []dispatcher.Capability {
+	hidden := make(map[string]bool, len(manifest.Capabilities))
+	for _, c := range manifest.Capabilities {
+		if c.Hidden {
+			hidden[c.Name] = true
+		}
+	}
+	visible := make([]dispatcher.Capability, 0, len(caps))
+	for _, c := range caps {
+		if !hidden[c.Name] {
+			visible = append(visible, c)
+		}
+	}
+	return visible
 }
 
 func (r *Runtime) runContext(run *runState) RunContext {

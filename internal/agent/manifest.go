@@ -34,6 +34,7 @@ type ChildManifest struct {
 type CapabilityConfig struct {
 	Name     string          `json:"name"`
 	Settings json.RawMessage `json:"settings,omitempty"`
+	Hidden   bool            `json:"hidden,omitempty"`
 }
 
 type DispatcherProvider interface {
