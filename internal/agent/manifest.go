@@ -71,7 +71,7 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 		}
 		capability.Settings = append(json.RawMessage(nil), normalized...)
 	}
-	if err := validateChildren(manifest.Capabilities, manifest.Children, provider); err != nil {
+	if err := validateChildren(manifest.Children, provider); err != nil {
 		return Manifest{}, err
 	}
 	return cloneManifest(manifest), nil
@@ -104,11 +104,7 @@ func EffectiveManifest(base Manifest, overrides []CapabilityConfig, provider Dis
 	return effective, nil
 }
 
-func validateChildren(parentCaps []CapabilityConfig, children []ChildManifest, provider DispatcherProvider) error {
-	parentIndex := make(map[string]CapabilityConfig, len(parentCaps))
-	for _, cap := range parentCaps {
-		parentIndex[cap.Name] = cap
-	}
+func validateChildren(children []ChildManifest, provider DispatcherProvider) error {
 	seen := make(map[string]struct{}, len(children))
 	for i := range children {
 		child := &children[i]
@@ -129,43 +125,20 @@ func validateChildren(parentCaps []CapabilityConfig, children []ChildManifest, p
 			if cap.Name == "" {
 				return fmt.Errorf("%w: child %q capability %d name is required", ErrInvalid, child.Brain, j)
 			}
-			parentCap, exists := parentIndex[cap.Name]
-			if !exists {
-				return fmt.Errorf("%w: child %q capability %q not in parent manifest", ErrInvalid, child.Brain, cap.Name)
-			}
-			if capabilityRequiresApproval(parentCap.Settings) {
-				return fmt.Errorf("%w: child %q cannot inherit capability %q because it requires approval in the parent manifest", ErrInvalid, child.Brain, cap.Name)
-			}
 			normalized, err := provider.Normalize(cap.Name, cap.Settings)
 			if err != nil {
 				return fmt.Errorf("%w: child %q %s settings: %v", ErrInvalid, child.Brain, cap.Name, err)
-			}
-			if err := provider.IsSubset(cap.Name, parentCap.Settings, normalized); err != nil {
-				return fmt.Errorf("%w: child %q capability %q: %v", ErrInvalid, child.Brain, cap.Name, err)
 			}
 			child.Capabilities[j].Settings = append(json.RawMessage(nil), normalized...)
 		}
 		if child.MaxDepth < 0 {
 			return fmt.Errorf("%w: child %q max_depth must not be negative", ErrInvalid, child.Brain)
 		}
-		if err := validateChildren(child.Capabilities, child.Children, provider); err != nil {
+		if err := validateChildren(child.Children, provider); err != nil {
 			return fmt.Errorf("child %q: %w", child.Brain, err)
 		}
 	}
 	return nil
-}
-
-func capabilityRequiresApproval(settings json.RawMessage) bool {
-	if len(settings) == 0 {
-		return false
-	}
-	var parsed struct {
-		RequireApproval *bool `json:"require_approval"`
-	}
-	if json.Unmarshal(settings, &parsed) != nil {
-		return false
-	}
-	return parsed.RequireApproval != nil && *parsed.RequireApproval
 }
 
 func cloneManifest(manifest Manifest) Manifest {
