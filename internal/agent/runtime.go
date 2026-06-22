@@ -212,9 +212,11 @@ type Event struct {
 }
 
 type JournalEvent struct {
-	RunID string `json:"run_id"`
-	Index int    `json:"index"`
-	Call  string `json:"call"`
+	RunID         string                `json:"run_id"`
+	Index         int                   `json:"index"`
+	Call          string                `json:"call"`
+	OutcomeStatus dispatcher.OutcomeKind `json:"outcome_status"`
+	OutcomeSize   int                   `json:"outcome_size"`
 }
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
@@ -1015,10 +1017,16 @@ func (r *Runtime) newJournal(run *runState) (journaled.Journal, error) {
 	}
 	return &observableJournal{
 		Journal: journal,
-		onStore: func(index int, call dispatcher.Call) {
+		onStore: func(index int, call dispatcher.Call, outcome dispatcher.Outcome) {
 			r.publish(run.threadID, Event{
 				Type: "journal.appended",
-				Data: JournalEvent{RunID: run.id, Index: index, Call: call.Name},
+				Data: JournalEvent{
+					RunID:         run.id,
+					Index:         index,
+					Call:          call.Name,
+					OutcomeStatus: outcome.Kind(),
+					OutcomeSize:   len(outcome.Result()),
+				},
 			})
 		},
 	}, nil
@@ -1319,7 +1327,7 @@ func randomID(prefix string) (string, error) {
 
 type observableJournal struct {
 	journaled.Journal
-	onStore func(index int, call dispatcher.Call)
+	onStore func(index int, call dispatcher.Call, outcome dispatcher.Outcome)
 }
 
 func (j *observableJournal) Store(index int, call dispatcher.Call, outcome dispatcher.Outcome) error {
@@ -1327,7 +1335,7 @@ func (j *observableJournal) Store(index int, call dispatcher.Call, outcome dispa
 		return err
 	}
 	if j.onStore != nil {
-		j.onStore(index, call)
+		j.onStore(index, call, outcome)
 	}
 	return nil
 }
