@@ -689,9 +689,13 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 		replacementManifest = &effective
 	}
 	if mode == RetryRestart {
+		parent := r.runContextLocked(run)
 		run.revision++
-		scope := r.runContextLocked(run)
-		if err := r.stateStore.ResetJournal(context.Background(), scope); err != nil {
+		child := r.runContextLocked(run)
+		// Mint a fresh revision via copy-on-write fork rather than mutating the
+		// journal in place. A full restart shares no recorded prefix (offset 0),
+		// so the prior revision is preserved intact and remains addressable.
+		if err := r.stateStore.ForkJournal(context.Background(), parent, child, 0); err != nil {
 			r.mu.Unlock()
 			return RunSnapshot{}, err
 		}

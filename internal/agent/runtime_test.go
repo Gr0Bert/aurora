@@ -127,10 +127,13 @@ func (s *runtimeStore) OpenJournal(_ context.Context, key RunContext) (journaled
 	return journal, nil
 }
 
-func (s *runtimeStore) ResetJournal(_ context.Context, key RunContext) error {
+func (s *runtimeStore) ForkJournal(_ context.Context, parent, child RunContext, offset int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.journals[key.SessionKey()] = &testJournal{}
+	s.journals[child.SessionKey()] = &testJournal{
+		parent: s.journals[parent.SessionKey()],
+		offset: offset,
+	}
 	return nil
 }
 
@@ -227,21 +230,30 @@ func (s *runtimeStore) MarkExecuted(_ context.Context, _ string, taskID string, 
 type testJournal struct {
 	mu      sync.Mutex
 	records []journaled.Record
+	parent  *testJournal
+	offset  int
 }
 
 func (j *testJournal) Load(index int) (journaled.Record, error) {
 	j.mu.Lock()
+	parent := j.parent
+	offset := j.offset
+	if parent != nil && index < offset {
+		j.mu.Unlock()
+		return parent.Load(index)
+	}
 	defer j.mu.Unlock()
-	if index < 0 || index >= len(j.records) {
+	local := index - offset
+	if local < 0 || local >= len(j.records) {
 		return journaled.Record{}, errors.New("record not found")
 	}
-	return j.records[index], nil
+	return j.records[local], nil
 }
 
 func (j *testJournal) Store(index int, call dispatcher.Call, outcome dispatcher.Outcome) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	if index != len(j.records) {
+	if index != j.offset+len(j.records) {
 		return errors.New("invalid index")
 	}
 	j.records = append(j.records, journaled.Record{Call: call.Copy(), Outcome: outcome.Copy()})
@@ -251,7 +263,7 @@ func (j *testJournal) Store(index int, call dispatcher.Call, outcome dispatcher.
 func (j *testJournal) Length() int {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return len(j.records)
+	return j.offset + len(j.records)
 }
 
 type runtimeSessions struct {

@@ -70,7 +70,7 @@ type StateStore interface {
 	SaveRun(context.Context, StoredRun) error
 	AppendMessages(context.Context, string, string, []HistoryMessage) error
 	OpenJournal(context.Context, RunContext) (journaled.Journal, error)
-	ResetJournal(context.Context, RunContext) error
+	ForkJournal(context.Context, RunContext, RunContext, int) error
 	AcquireLease(context.Context, string, string, string, string, time.Time, time.Duration) (bool, error)
 	ReleaseLease(context.Context, string, string, string, string) error
 }
