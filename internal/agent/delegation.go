@@ -45,7 +45,7 @@ func (r *delegationRouter) Dispatch(ctx context.Context, key RunContext, call di
 		childName := call.Name[len("call."):]
 		child, ok := r.children[childName]
 		if ok {
-			return child.dispatch(ctx, call)
+			return child.dispatch(ctx, key, call)
 		}
 	}
 	return r.next.Dispatch(ctx, key, call)
@@ -59,12 +59,33 @@ func (r *delegationRouter) Capabilities() []dispatcher.Capability {
 	return caps
 }
 
-func (c *delegationChild) dispatch(ctx context.Context, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
 	slog.Info("delegation: dispatch started", "child", c.manifest.Name)
 
 	var args delegateArgs
 	if err := json.Unmarshal(call.Args, &args); err != nil {
 		return dispatcher.Failed(fmt.Sprintf("decode delegation args: %v", err)), nil
+	}
+
+	// Deep cascade resume: when the parent run is being restarted, re-execution
+	// re-issues the same deterministic sequence of delegation calls. Rather than
+	// spawning a fresh child each time, reuse the existing child run recorded at
+	// this position (in spawn order) and retry it, which recursively cascades the
+	// restart down its own subtree.
+	if childID, threadID, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
+		slog.Info("delegation: cascade retry", "child", c.manifest.Name, "run_id", childID)
+		if _, err := c.runtime.Retry(childID, RetryRestart, nil); err != nil {
+			return dispatcher.Failed(fmt.Sprintf("cascade retry child: %v", err)), nil
+		}
+		answer, err := c.runtime.waitForCompletion(ctx, childID, threadID)
+		if err != nil {
+			return dispatcher.Failed(err.Error()), nil
+		}
+		result, marshalErr := json.Marshal(delegateResult{Answer: answer})
+		if marshalErr != nil {
+			return dispatcher.Outcome{}, marshalErr
+		}
+		return dispatcher.Result(result), nil
 	}
 	slog.Info("delegation: creating child", "child", c.manifest.Name, "message_len", len(args.Message))
 
@@ -78,7 +99,7 @@ func (c *delegationChild) dispatch(ctx context.Context, call dispatcher.Call) (d
 	}
 	slog.Info("delegation: thread created", "child", c.manifest.Name, "thread_id", thread.ID)
 
-	run, err := c.runtime.createChildRun(thread.ID, args.Message)
+	run, err := c.runtime.createChildRun(parent.RunID, thread.ID, args.Message)
 	if err != nil {
 		slog.Error("delegation: create run failed", "child", c.manifest.Name, "error", err)
 		return dispatcher.Failed(fmt.Sprintf("create child run: %v", err)), nil
@@ -162,7 +183,28 @@ func delegationCapability(name string, child ChildManifest) dispatcher.Capabilit
 	}
 }
 
-func (r *Runtime) createChildRun(threadID string, message string) (RunSnapshot, error) {
+// nextCascadeChild returns the next existing child run to reuse when a parent run
+// is being restarted with cascade enabled, advancing through the parent's children
+// in spawn order. It returns ok=false once cascade is off or the recorded children
+// are exhausted, in which case the caller spawns a fresh child.
+func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	parent := r.runs[parentRunID]
+	if parent == nil || !parent.cascade || parent.cascadeCursor >= len(parent.childRunIDs) {
+		return "", "", false
+	}
+	childID = parent.childRunIDs[parent.cascadeCursor]
+	parent.cascadeCursor++
+	child := r.runs[childID]
+	if child == nil {
+		// Recorded child is no longer resident; fall back to spawning fresh.
+		return "", "", false
+	}
+	return childID, child.threadID, true
+}
+
+func (r *Runtime) createChildRun(parentRunID string, threadID string, message string) (RunSnapshot, error) {
 	if message == "" {
 		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
 	}
@@ -208,6 +250,7 @@ func (r *Runtime) createChildRun(threadID string, message string) (RunSnapshot, 
 		effectiveManifest: effectiveManifest,
 		revision:          1,
 		brainDigest:       brain.Digest,
+		parentRunID:       parentRunID,
 	}
 	run.journal, err = r.newJournal(run)
 	if err != nil {
@@ -234,6 +277,10 @@ func (r *Runtime) createChildRun(threadID string, message string) (RunSnapshot, 
 		thread.activeRunID = ""
 		r.mu.Unlock()
 		return RunSnapshot{}, err
+	}
+	if parent := r.runs[parentRunID]; parent != nil {
+		parent.childRunIDs = append(parent.childRunIDs, runID)
+		_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(parent))
 	}
 	snapshot := r.runSnapshotLocked(run)
 	r.mu.Unlock()

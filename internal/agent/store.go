@@ -48,6 +48,10 @@ type StoredRun struct {
 	Error             string
 	EffectiveManifest Manifest
 	BrainDigest       string
+	// ParentRunID links a delegated child run back to the run that spawned it;
+	// ChildRunIDs records, in spawn order, the child runs this run delegated to.
+	ParentRunID string
+	ChildRunIDs []string
 }
 
 type StoredMessage struct {

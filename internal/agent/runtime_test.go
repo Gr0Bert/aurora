@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -469,4 +470,161 @@ func buildBrain(t *testing.T) []byte {
 		t.Fatalf("read brain: %v", err)
 	}
 	return raw
+}
+
+// cascadeDispatchers drives a parent brain to delegate to a "child" once and
+// then finish. The openai.chat fake decides what to emit by inspecting the
+// conversation: the child's own turn (whose user message is the delegated task)
+// finishes immediately; the parent's first turn delegates; its second turn (which
+// now carries a tool observation) finishes.
+type cascadeDispatchers struct{}
+
+func (cascadeDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
+	if len(settings) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), settings...), nil
+}
+
+func (cascadeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (dispatcher.Dispatcher[RunContext], error) {
+	return cascadeDispatcher{}, nil
+}
+
+func (cascadeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
+
+type cascadeDispatcher struct{}
+
+func chatActions(actions string) dispatcher.Outcome {
+	payload, _ := json.Marshal(map[string]any{
+		"choices": []any{map[string]any{"message": map[string]any{"content": actions}}},
+	})
+	return dispatcher.Result(payload)
+}
+
+func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+	if call.Name != "openai.chat" {
+		return dispatcher.Failed("unsupported call: " + call.Name), nil
+	}
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	_ = json.Unmarshal(call.Args, &req)
+	isChild, hasTool := false, false
+	for _, m := range req.Messages {
+		if m.Role == "user" && strings.Contains(m.Content, "do subtask") {
+			isChild = true
+		}
+		if m.Role == "tool" {
+			hasTool = true
+		}
+	}
+	switch {
+	case isChild:
+		return chatActions(`{"actions":[{"action":"final","content":{"answer":"child-done"}}]}`), nil
+	case hasTool:
+		return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
+	default:
+		return chatActions(`{"actions":[{"action":"call.child","content":{"message":"do subtask"}}]}`), nil
+	}
+}
+
+func onlyChildRun(t *testing.T, r *Runtime, parentID string) string {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	parent := r.runs[parentID]
+	if parent == nil || len(parent.childRunIDs) != 1 {
+		t.Fatalf("parent %q childRunIDs = %v, want exactly one", parentID, parentChildIDs(parent))
+	}
+	return parent.childRunIDs[0]
+}
+
+func parentChildIDs(run *runState) []string {
+	if run == nil {
+		return nil
+	}
+	return run.childRunIDs
+}
+
+func runField(t *testing.T, r *Runtime, id string) (parentRunID string, attempt int) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run := r.runs[id]
+	if run == nil {
+		t.Fatalf("run %q not found", id)
+	}
+	return run.parentRunID, run.attempt
+}
+
+func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not found")
+	}
+	store := newRuntimeStore()
+	runtime, err := NewRuntime(context.Background(), Config{
+		Brains: staticBrains{
+			defaultID: "brain@1",
+			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		},
+		Dispatchers:  cascadeDispatchers{},
+		StateStore:   store,
+		TaskStore:    store,
+		SessionStore: newRuntimeSessions(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	thread, err := runtime.CreateThread(Manifest{
+		Version:  ManifestVersion,
+		Brain:    "brain@1",
+		Children: []ChildManifest{{Name: "child", Brain: "brain@1", Capabilities: []CapabilityConfig{}}},
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "parent task", nil)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	first := waitForStatus(t, runtime, run.ID, RunCompleted)
+	if first.Answer != "parent-done" {
+		t.Fatalf("parent answer = %q, want parent-done", first.Answer)
+	}
+
+	// Addressability: the parent recorded exactly one child, and that child links
+	// back to the parent.
+	childID := onlyChildRun(t, runtime, run.ID)
+	childParent, childAttempt := runField(t, runtime, childID)
+	if childParent != run.ID {
+		t.Fatalf("child.parentRunID = %q, want %q", childParent, run.ID)
+	}
+
+	// Deep cascade resume: restarting the parent must reuse and retry the same
+	// child run rather than spawning a fresh one.
+	if _, err := runtime.Retry(run.ID, RetryRestart, nil); err != nil {
+		t.Fatalf("retry parent: %v", err)
+	}
+	waitForStatus(t, runtime, run.ID, RunCompleted)
+
+	reusedChildID := onlyChildRun(t, runtime, run.ID)
+	if reusedChildID != childID {
+		t.Fatalf("cascade spawned a new child %q, want reuse of %q", reusedChildID, childID)
+	}
+	if _, attempt := runField(t, runtime, childID); attempt <= childAttempt {
+		t.Fatalf("child attempt = %d, want > %d (child should have been retried)", attempt, childAttempt)
+	}
 }

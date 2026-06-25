@@ -130,6 +130,15 @@ type runState struct {
 	effectiveManifest Manifest
 	revision          uint64
 	brainDigest       string
+	// parentRunID and childRunIDs make delegated runs addressable: a child knows
+	// the run that spawned it, and a parent records its children in spawn order.
+	parentRunID string
+	childRunIDs []string
+	// cascade re-execution state: when a run is restarted, cascade is set so the
+	// delegation router reuses (retries) the existing children at cascadeCursor in
+	// spawn order rather than spawning fresh ones.
+	cascade       bool
+	cascadeCursor int
 }
 
 type agentInput struct {
@@ -661,6 +670,14 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 	}
 	switch run.status {
 	case RunYielded, RunWaitingTask, RunStopped, RunFailed, RunInterrupted:
+	case RunCompleted:
+		// A completed run has nothing to resume, but it can be restarted from
+		// scratch (re-run as a new copy-on-write revision). This also lets a
+		// parent restart cascade into already-completed children.
+		if mode != RetryRestart {
+			r.mu.Unlock()
+			return RunSnapshot{}, fmt.Errorf("%w: completed run %s can only be restarted, not resumed", ErrConflict, runID)
+		}
 	default:
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot retry from %s", ErrConflict, runID, run.status)
@@ -706,8 +723,13 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 		}
 		run.journal = journal
 		run.preserveSession = false
+		// Re-executing from scratch: reuse the existing child subtree in spawn
+		// order rather than spawning fresh children (deep cascade resume).
+		run.cascade = true
+		run.cascadeCursor = 0
 	} else {
 		run.preserveSession = run.status == RunYielded || run.status == RunWaitingTask
+		run.cascade = false
 	}
 	if replacementManifest != nil {
 		run.effectiveManifest = *replacementManifest
@@ -1213,6 +1235,8 @@ func (r *Runtime) restore(ctx context.Context) error {
 			err:               stored.Error,
 			effectiveManifest: cloneManifest(stored.EffectiveManifest),
 			brainDigest:       brain.Digest,
+			parentRunID:       stored.ParentRunID,
+			childRunIDs:       append([]string(nil), stored.ChildRunIDs...),
 		}
 		if run.revision == 0 {
 			run.revision = 1
@@ -1308,6 +1332,8 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		Error:             run.err,
 		EffectiveManifest: cloneManifest(run.effectiveManifest),
 		BrainDigest:       run.brainDigest,
+		ParentRunID:       run.parentRunID,
+		ChildRunIDs:       append([]string(nil), run.childRunIDs...),
 	}
 }
 
