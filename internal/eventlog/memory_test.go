@@ -3,7 +3,6 @@ package eventlog
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"testing"
 )
 
@@ -12,7 +11,7 @@ func TestAppendAssignsContiguousSeq(t *testing.T) {
 	ctx := context.Background()
 	scope := Scope{TenantID: "t", ThreadID: "th"}
 
-	head, err := log.Append(ctx, scope, 0,
+	head, err := log.Append(ctx, scope,
 		Event{Kind: "run.created"},
 		Event{Kind: "run.started"},
 	)
@@ -29,27 +28,10 @@ func TestAppendAssignsContiguousSeq(t *testing.T) {
 	if len(events) != 2 || events[0].Seq != 1 || events[1].Seq != 2 {
 		t.Fatalf("unexpected events %+v", events)
 	}
-}
-
-func TestAppendRejectsStaleHead(t *testing.T) {
-	log := NewMemory()
-	ctx := context.Background()
-	scope := Scope{TenantID: "t", ThreadID: "th"}
-
-	if _, err := log.Append(ctx, scope, 0, Event{Kind: "a"}); err != nil {
-		t.Fatal(err)
-	}
-	// A writer that still thinks the head is 0 must be rejected.
-	head, err := log.Append(ctx, scope, 0, Event{Kind: "b"})
-	if !errors.Is(err, ErrConflict) {
-		t.Fatalf("err = %v, want ErrConflict", err)
-	}
-	if head != 1 {
-		t.Fatalf("conflict head = %d, want current head 1", head)
-	}
-	// Appending at the real head succeeds.
-	if _, err := log.Append(ctx, scope, 1, Event{Kind: "b"}); err != nil {
-		t.Fatalf("append at head: %v", err)
+	// A second append continues the sequence.
+	head, err = log.Append(ctx, scope, Event{Kind: "run.finished"})
+	if err != nil || head != 3 {
+		t.Fatalf("second append head = %d, err = %v", head, err)
 	}
 }
 
@@ -57,7 +39,7 @@ func TestReadAfterIsExclusive(t *testing.T) {
 	log := NewMemory()
 	ctx := context.Background()
 	scope := Scope{TenantID: "t", ThreadID: "th"}
-	_, _ = log.Append(ctx, scope, 0, Event{Kind: "a"}, Event{Kind: "b"}, Event{Kind: "c"})
+	_, _ = log.Append(ctx, scope, Event{Kind: "a"}, Event{Kind: "b"}, Event{Kind: "c"})
 
 	tail, err := log.Read(ctx, scope, 1)
 	if err != nil {
@@ -76,7 +58,7 @@ func TestStoredEventsAreIsolatedFromCallerMutation(t *testing.T) {
 	ctx := context.Background()
 	scope := Scope{TenantID: "t", ThreadID: "th"}
 	data := json.RawMessage(`{"x":1}`)
-	if _, err := log.Append(ctx, scope, 0, Event{Kind: "a", Data: data}); err != nil {
+	if _, err := log.Append(ctx, scope, Event{Kind: "a", Data: data}); err != nil {
 		t.Fatal(err)
 	}
 	data[0] = 'X' // mutate the caller's slice after appending
@@ -95,9 +77,9 @@ func TestStoredEventsAreIsolatedFromCallerMutation(t *testing.T) {
 func TestStreamsListsTenantThreads(t *testing.T) {
 	log := NewMemory()
 	ctx := context.Background()
-	_, _ = log.Append(ctx, Scope{"t1", "b"}, 0, Event{Kind: "x"})
-	_, _ = log.Append(ctx, Scope{"t1", "a"}, 0, Event{Kind: "x"})
-	_, _ = log.Append(ctx, Scope{"t2", "c"}, 0, Event{Kind: "x"})
+	_, _ = log.Append(ctx, Scope{"t1", "b"}, Event{Kind: "x"})
+	_, _ = log.Append(ctx, Scope{"t1", "a"}, Event{Kind: "x"})
+	_, _ = log.Append(ctx, Scope{"t2", "c"}, Event{Kind: "x"})
 
 	streams, err := log.Streams(ctx, "t1")
 	if err != nil {

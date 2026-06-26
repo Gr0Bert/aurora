@@ -20,15 +20,12 @@ func NewMemory() *Memory {
 }
 
 // Append implements Log.
-func (m *Memory) Append(_ context.Context, scope Scope, expectedHead uint64, events ...Event) (uint64, error) {
+func (m *Memory) Append(_ context.Context, scope Scope, events ...Event) (uint64, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	existing := m.streams[scope]
 	head := uint64(len(existing))
-	if head != expectedHead {
-		return head, ErrConflict
-	}
 	if len(events) == 0 {
 		return head, nil
 	}
