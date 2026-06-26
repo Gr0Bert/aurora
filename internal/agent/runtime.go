@@ -371,24 +371,114 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		if err != nil {
 			return nil, err
 		}
-		compute, err := capcompute.NewComputeCompiledPlugin[string, RunKey](ctx, capcompute.Config[string, RunKey]{
-			Manifest: extism.Manifest{
-				Wasm: []extism.Wasm{extism.WasmData{
-					Data: source.Wasm, Hash: artifact.Digest, Name: artifact.ID,
-				}},
-			},
-			PluginConfig: extism.PluginConfig{EnableWasi: true},
-			SessionStore: runtime.sessionStore,
-		})
+		compute, err := runtime.compileBrain(ctx, artifact.ID, source.Wasm, artifact.Digest)
 		if err != nil {
 			for _, opened := range runtime.computes {
 				_ = opened.CloseCompiled(context.Background())
 			}
-			return nil, fmt.Errorf("compile brain %q: %w", artifact.ID, err)
+			return nil, err
 		}
 		runtime.computes[artifact.ID] = compute
 	}
 	return runtime, nil
+}
+
+// compileBrain compiles a brain's wasm into a runnable compute plugin. It is
+// pure with respect to runtime state (it only reads the session store), so it
+// can be called outside the runtime mutex while preparing a SetBrains swap.
+func (r *Runtime) compileBrain(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.ComputeCompiledPlugin[string, RunKey], error) {
+	compute, err := capcompute.NewComputeCompiledPlugin[string, RunKey](ctx, capcompute.Config[string, RunKey]{
+		Manifest: extism.Manifest{
+			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digest, Name: id}},
+		},
+		PluginConfig: extism.PluginConfig{EnableWasi: true},
+		SessionStore: r.sessionStore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compile brain %q: %w", id, err)
+	}
+	return compute, nil
+}
+
+// SetBrains declaratively reconciles the registered brains to the given set:
+// brains absent from the set are removed, new or content-changed brains are
+// (re)compiled, and unchanged brains are left running. It is safe to call at any
+// time; the control plane uses it to hot-load brains from Brain CRDs without a
+// restart. Compilation happens outside the runtime mutex so dispatch is only
+// briefly paused for the swap. If any brain fails to compile, no change is
+// applied. Removing a brain that an in-flight run is using is best-effort: that
+// run fails on its next step.
+func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
+	current := r.brains.digests()
+	desired := make(map[string]struct{}, len(sources))
+
+	// Compile additions/replacements outside the lock; fail atomically.
+	type compiled struct {
+		id      string
+		wasm    []byte
+		digest  string
+		compute *capcompute.ComputeCompiledPlugin[string, RunKey]
+	}
+	var fresh []compiled
+	for _, src := range sources {
+		id := strings.TrimSpace(src.ID)
+		if id == "" || len(src.Wasm) == 0 {
+			return fmt.Errorf("%w: brain id and wasm bytes are required", ErrInvalid)
+		}
+		if _, dup := desired[id]; dup {
+			return fmt.Errorf("%w: duplicate brain %q", ErrInvalid, id)
+		}
+		desired[id] = struct{}{}
+		wasm := append([]byte(nil), src.Wasm...)
+		digest := digestOf(wasm)
+		if cur, ok := current[id]; ok && cur == digest {
+			continue // unchanged
+		}
+		compute, err := r.compileBrain(ctx, id, wasm, digest)
+		if err != nil {
+			for _, c := range fresh {
+				_ = c.compute.CloseCompiled(context.Background())
+			}
+			return err
+		}
+		fresh = append(fresh, compiled{id: id, wasm: wasm, digest: digest, compute: compute})
+	}
+
+	// Swap under the runtime mutex (which guards r.computes), collecting the
+	// compute plugins that are being replaced or removed so they can be closed
+	// after the lock is released.
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		for _, c := range fresh {
+			_ = c.compute.CloseCompiled(context.Background())
+		}
+		return fmt.Errorf("%w: runtime is closed", ErrConflict)
+	}
+	var retired []*capcompute.ComputeCompiledPlugin[string, RunKey]
+	for _, c := range fresh {
+		if old := r.computes[c.id]; old != nil {
+			retired = append(retired, old)
+		}
+		r.computes[c.id] = c.compute
+		r.brains.put(c.id, c.wasm, c.digest)
+	}
+	for id := range current {
+		if _, keep := desired[id]; keep {
+			continue
+		}
+		if old := r.computes[id]; old != nil {
+			retired = append(retired, old)
+		}
+		delete(r.computes, id)
+		r.brains.remove(id)
+	}
+	r.mu.Unlock()
+
+	for _, old := range retired {
+		_ = old.CloseCompiled(context.Background())
+	}
+	return nil
 }
 
 func (r *Runtime) CreateThread(manifest Manifest) (ThreadSnapshot, error) {

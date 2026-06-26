@@ -318,7 +318,6 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
-		{name: "brain provider", mutate: func(config *Config) { config.Brains = nil }},
 		{name: "dispatcher provider", mutate: func(config *Config) { config.Dispatchers = nil }},
 		{name: "state store", mutate: func(config *Config) { config.StateStore = nil }},
 		{name: "task store", mutate: func(config *Config) { config.TaskStore = nil }},
@@ -396,6 +395,80 @@ func TestRuntimePassesEffectiveManifestToDispatcherProvider(t *testing.T) {
 	if len(dispatchers.manifests) != 1 ||
 		string(dispatchers.manifests[0].Capabilities[0].Settings) != `{"value":2}` {
 		t.Fatalf("dispatcher manifests = %+v", dispatchers.manifests)
+	}
+}
+
+// TestRuntimeSetBrainsLifecycle boots with no brain (so brain runs fail), then
+// hot-registers a brain via SetBrains and drives a run through it, then removes
+// it — covering the control plane's live Brain CRD add/remove path.
+func TestRuntimeSetBrainsLifecycle(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not found")
+	}
+	wasm := buildBrain(t)
+	dispatchers := &runtimeDispatchers{}
+	store := newRuntimeStore()
+	runtime, err := NewRuntime(context.Background(), Config{
+		Brains:       nil, // boot with zero brains
+		Dispatchers:  dispatchers,
+		StateStore:   store,
+		TaskStore:    store,
+		SessionStore: newRuntimeSessions(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	if len(runtime.Brains()) != 0 {
+		t.Fatalf("expected no brains at boot, got %v", runtime.Brains())
+	}
+	if _, err := runtime.CreateThread(Manifest{Version: ManifestVersion}); err == nil {
+		t.Fatal("creating a thread with no registered brain should fail")
+	}
+
+	// Hot-register the brain.
+	if err := runtime.SetBrains(context.Background(), []BrainSource{{ID: "brain@1", Wasm: wasm}}); err != nil {
+		t.Fatalf("set brains: %v", err)
+	}
+	if got := runtime.Brains(); len(got) != 1 || got[0].ID != "brain@1" {
+		t.Fatalf("brains after register = %v", got)
+	}
+
+	// A run now dispatches through the freshly registered brain.
+	thread, err := runtime.CreateThread(Manifest{
+		Version:      ManifestVersion,
+		Capabilities: []CapabilityConfig{{Name: "custom.call", Settings: json.RawMessage(`{"value":1}`)}},
+	})
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "finish", nil)
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	waitForStatus(t, runtime, run.ID, RunCompleted)
+
+	// Re-applying the same set is a no-op; removing it leaves an empty registry.
+	if err := runtime.SetBrains(context.Background(), []BrainSource{{ID: "brain@1", Wasm: wasm}}); err != nil {
+		t.Fatalf("re-apply: %v", err)
+	}
+	if len(runtime.Brains()) != 1 {
+		t.Fatalf("re-apply changed registry: %v", runtime.Brains())
+	}
+	if err := runtime.SetBrains(context.Background(), nil); err != nil {
+		t.Fatalf("clear brains: %v", err)
+	}
+	if len(runtime.Brains()) != 0 {
+		t.Fatalf("expected empty registry after removal, got %v", runtime.Brains())
 	}
 }
 
