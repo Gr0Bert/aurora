@@ -130,6 +130,27 @@ type runState struct {
 	effectiveManifest Manifest
 	revision          uint64
 	brainDigest       string
+	// parentRunID and childRunIDs make delegated runs addressable: a child knows
+	// the run that spawned it, and a parent records its children in spawn order.
+	parentRunID string
+	childRunIDs []string
+	// childSpawnOffsets records, parallel to childRunIDs, the journal position at
+	// which each child was spawned. It lets a fork-from-offset retry start the
+	// cascade cursor past children whose spawn call is replayed from the shared
+	// prefix, so only re-executed children are reused.
+	childSpawnOffsets []int
+	// failureOffset is the journal length captured when the run last failed; a hard
+	// retry forks just before it so the failing step re-executes over a shared
+	// copy-on-write prefix rather than re-running from scratch.
+	failureOffset int
+	// cascade re-execution state: when a run is restarted, cascade is set so the
+	// delegation router reuses (retries) the existing children at cascadeCursor in
+	// spawn order rather than spawning fresh ones.
+	cascade       bool
+	cascadeCursor int
+	// failure forces the run to finish as failed regardless of how its play ends;
+	// set when a delegated child fails under an OnFailurePropagate policy.
+	failure error
 }
 
 type agentInput struct {
@@ -211,11 +232,11 @@ type Event struct {
 }
 
 type JournalEvent struct {
-	RunID         string                `json:"run_id"`
-	Index         int                   `json:"index"`
-	Call          string                `json:"call"`
+	RunID         string                 `json:"run_id"`
+	Index         int                    `json:"index"`
+	Call          string                 `json:"call"`
 	OutcomeStatus dispatcher.OutcomeKind `json:"outcome_status"`
-	OutcomeSize   int                   `json:"outcome_size"`
+	OutcomeSize   int                    `json:"outcome_size"`
 }
 
 func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
@@ -291,8 +312,12 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			runtime.mu.Lock()
 			run := runtime.runs[key.RunID]
 			var manifest Manifest
+			var message string
+			var history []HistoryMessage
 			if run != nil {
 				manifest = cloneManifest(run.effectiveManifest)
+				message = run.message
+				history = append([]HistoryMessage(nil), run.history...)
 			}
 			runtime.mu.Unlock()
 			if run == nil {
@@ -309,7 +334,9 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			if len(manifest.Children) > 0 {
 				d = newDelegationRouter(d, manifest.Children, runtime)
 			}
-			return d, nil
+			// Wrap with the lifecycle dispatcher so agent.input/agent.finish are
+			// recorded on the replay journal alongside capability calls.
+			return newLifecycleDispatcher(d, message, history, manifest), nil
 		},
 		NewJournal: func(_ context.Context, key RunKey) (journaled.Journal, error) {
 			runtime.mu.Lock()
@@ -344,24 +371,114 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 		if err != nil {
 			return nil, err
 		}
-		compute, err := capcompute.NewComputeCompiledPlugin[string, RunKey](ctx, capcompute.Config[string, RunKey]{
-			Manifest: extism.Manifest{
-				Wasm: []extism.Wasm{extism.WasmData{
-					Data: source.Wasm, Hash: artifact.Digest, Name: artifact.ID,
-				}},
-			},
-			PluginConfig: extism.PluginConfig{EnableWasi: true},
-			SessionStore: runtime.sessionStore,
-		})
+		compute, err := runtime.compileBrain(ctx, artifact.ID, source.Wasm, artifact.Digest)
 		if err != nil {
 			for _, opened := range runtime.computes {
 				_ = opened.CloseCompiled(context.Background())
 			}
-			return nil, fmt.Errorf("compile brain %q: %w", artifact.ID, err)
+			return nil, err
 		}
 		runtime.computes[artifact.ID] = compute
 	}
 	return runtime, nil
+}
+
+// compileBrain compiles a brain's wasm into a runnable compute plugin. It is
+// pure with respect to runtime state (it only reads the session store), so it
+// can be called outside the runtime mutex while preparing a SetBrains swap.
+func (r *Runtime) compileBrain(ctx context.Context, id string, wasm []byte, digest string) (*capcompute.ComputeCompiledPlugin[string, RunKey], error) {
+	compute, err := capcompute.NewComputeCompiledPlugin[string, RunKey](ctx, capcompute.Config[string, RunKey]{
+		Manifest: extism.Manifest{
+			Wasm: []extism.Wasm{extism.WasmData{Data: wasm, Hash: digest, Name: id}},
+		},
+		PluginConfig: extism.PluginConfig{EnableWasi: true},
+		SessionStore: r.sessionStore,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("compile brain %q: %w", id, err)
+	}
+	return compute, nil
+}
+
+// SetBrains declaratively reconciles the registered brains to the given set:
+// brains absent from the set are removed, new or content-changed brains are
+// (re)compiled, and unchanged brains are left running. It is safe to call at any
+// time; the control plane uses it to hot-load brains from Brain CRDs without a
+// restart. Compilation happens outside the runtime mutex so dispatch is only
+// briefly paused for the swap. If any brain fails to compile, no change is
+// applied. Removing a brain that an in-flight run is using is best-effort: that
+// run fails on its next step.
+func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
+	current := r.brains.digests()
+	desired := make(map[string]struct{}, len(sources))
+
+	// Compile additions/replacements outside the lock; fail atomically.
+	type compiled struct {
+		id      string
+		wasm    []byte
+		digest  string
+		compute *capcompute.ComputeCompiledPlugin[string, RunKey]
+	}
+	var fresh []compiled
+	for _, src := range sources {
+		id := strings.TrimSpace(src.ID)
+		if id == "" || len(src.Wasm) == 0 {
+			return fmt.Errorf("%w: brain id and wasm bytes are required", ErrInvalid)
+		}
+		if _, dup := desired[id]; dup {
+			return fmt.Errorf("%w: duplicate brain %q", ErrInvalid, id)
+		}
+		desired[id] = struct{}{}
+		wasm := append([]byte(nil), src.Wasm...)
+		digest := digestOf(wasm)
+		if cur, ok := current[id]; ok && cur == digest {
+			continue // unchanged
+		}
+		compute, err := r.compileBrain(ctx, id, wasm, digest)
+		if err != nil {
+			for _, c := range fresh {
+				_ = c.compute.CloseCompiled(context.Background())
+			}
+			return err
+		}
+		fresh = append(fresh, compiled{id: id, wasm: wasm, digest: digest, compute: compute})
+	}
+
+	// Swap under the runtime mutex (which guards r.computes), collecting the
+	// compute plugins that are being replaced or removed so they can be closed
+	// after the lock is released.
+	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		for _, c := range fresh {
+			_ = c.compute.CloseCompiled(context.Background())
+		}
+		return fmt.Errorf("%w: runtime is closed", ErrConflict)
+	}
+	var retired []*capcompute.ComputeCompiledPlugin[string, RunKey]
+	for _, c := range fresh {
+		if old := r.computes[c.id]; old != nil {
+			retired = append(retired, old)
+		}
+		r.computes[c.id] = c.compute
+		r.brains.put(c.id, c.wasm, c.digest)
+	}
+	for id := range current {
+		if _, keep := desired[id]; keep {
+			continue
+		}
+		if old := r.computes[id]; old != nil {
+			retired = append(retired, old)
+		}
+		delete(r.computes, id)
+		r.brains.remove(id)
+	}
+	r.mu.Unlock()
+
+	for _, old := range retired {
+		_ = old.CloseCompiled(context.Background())
+	}
+	return nil
 }
 
 func (r *Runtime) CreateThread(manifest Manifest) (ThreadSnapshot, error) {
@@ -655,6 +772,14 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 	}
 	switch run.status {
 	case RunYielded, RunWaitingTask, RunStopped, RunFailed, RunInterrupted:
+	case RunCompleted:
+		// A completed run has nothing to resume, but it can be restarted from
+		// scratch (re-run as a new copy-on-write revision). This also lets a
+		// parent restart cascade into already-completed children.
+		if mode != RetryRestart {
+			r.mu.Unlock()
+			return RunSnapshot{}, fmt.Errorf("%w: completed run %s can only be restarted, not resumed", ErrConflict, runID)
+		}
 	default:
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot retry from %s", ErrConflict, runID, run.status)
@@ -683,9 +808,18 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 		replacementManifest = &effective
 	}
 	if mode == RetryRestart {
+		// A hard retry of a failed run forks just before the failing step so the
+		// completed prefix is shared copy-on-write and only the failure onward is
+		// re-executed. Any other restart (e.g. redoing a completed run) shares no
+		// prefix and re-runs from the beginning.
+		forkOffset := 0
+		if run.status == RunFailed && run.failureOffset > 0 {
+			forkOffset = run.failureOffset - 1
+		}
+		parent := r.runContextLocked(run)
 		run.revision++
-		scope := r.runContextLocked(run)
-		if err := r.stateStore.ResetJournal(context.Background(), scope); err != nil {
+		child := r.runContextLocked(run)
+		if err := r.stateStore.ForkJournal(context.Background(), parent, child, forkOffset); err != nil {
 			r.mu.Unlock()
 			return RunSnapshot{}, err
 		}
@@ -696,8 +830,19 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 		}
 		run.journal = journal
 		run.preserveSession = false
+		// Reuse the existing child subtree in spawn order (deep cascade resume).
+		// Children whose spawn call is replayed from the shared prefix are skipped;
+		// the cursor starts at the first child re-executed past the fork offset.
+		run.cascade = true
+		run.cascadeCursor = 0
+		for _, off := range run.childSpawnOffsets {
+			if off < forkOffset {
+				run.cascadeCursor++
+			}
+		}
 	} else {
 		run.preserveSession = run.status == RunYielded || run.status == RunWaitingTask
+		run.cascade = false
 	}
 	if replacementManifest != nil {
 		run.effectiveManifest = *replacementManifest
@@ -706,6 +851,8 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 	run.attempt++
 	run.answer = ""
 	run.err = ""
+	run.failure = nil
+	run.failureOffset = 0
 	run.stopRequested = false
 	run.startedAt = nil
 	run.completedAt = nil
@@ -872,18 +1019,8 @@ func (r *Runtime) execute(runID string) {
 			UserData:   runCtx,
 			Dispatcher: sessionDispatcher,
 		})
-		if err == nil {
-			var input []byte
-			input, err = json.Marshal(agentInput{
-				Message:      run.message,
-				History:      run.history,
-				SystemPrompt: run.effectiveManifest.SystemPrompt,
-				Capabilities: visibleCapabilities(session.Capabilities(), run.effectiveManifest),
-			})
-			if err == nil {
-				session.Input = input
-			}
-		}
+		// The guest fetches its input via the agent.input host call (served by the
+		// lifecycle dispatcher), so no entrypoint input is supplied here.
 		if err == nil {
 			err = r.sessionStore.SaveSession(context.Background(), session.GuestData.SessionKey(), session)
 		}
@@ -933,18 +1070,21 @@ func (r *Runtime) execute(runID string) {
 
 	result := <-handle.Results()
 	slog.Info("execute: play finished", "run_id", runID, "status", result.Status, "err", result.Err)
+	r.mu.Lock()
+	forced := r.runs[runID].failure
+	r.mu.Unlock()
+	if forced != nil {
+		r.finish(runID, RunFailed, "", forced)
+		return
+	}
 	switch result.Status {
 	case capcompute.PlayCompleted:
-		var output agentOutput
-		if err := json.Unmarshal(result.Output, &output); err != nil {
-			r.finish(runID, RunFailed, "", fmt.Errorf("decode agent output: %w", err))
+		answer, err := r.answerFromJournal(runID)
+		if err != nil {
+			r.finish(runID, RunFailed, "", err)
 			return
 		}
-		if output.Answer == "" {
-			r.finish(runID, RunFailed, "", errors.New("agent output missing answer"))
-			return
-		}
-		r.finish(runID, RunCompleted, output.Answer, nil)
+		r.finish(runID, RunCompleted, answer, nil)
 	case capcompute.PlayYielded:
 		tasks, taskErr := r.taskStore.List(context.Background(), r.tenantID, runID)
 		if taskErr == nil && hasPendingTask(tasks) {
@@ -966,6 +1106,24 @@ func (r *Runtime) execute(runID string) {
 	}
 }
 
+// requestRunFailure marks a run to finish as failed and stops its in-flight play.
+// It is used to propagate a delegated child's failure up to its parent run when
+// the child's failure-mode policy is OnFailurePropagate.
+func (r *Runtime) requestRunFailure(runID string, err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	run := r.runs[runID]
+	if run == nil {
+		return
+	}
+	if run.failure == nil {
+		run.failure = err
+	}
+	if run.handle != nil {
+		run.handle.Stop()
+	}
+}
+
 func (r *Runtime) finish(runID string, status RunStatus, answer string, err error) {
 	r.mu.Lock()
 	run := r.runs[runID]
@@ -976,13 +1134,10 @@ func (r *Runtime) finish(runID string, status RunStatus, answer string, err erro
 	r.finishLocked(run, status, answer, err)
 	_ = r.stateStore.SaveRun(context.Background(), r.storedRunLocked(run))
 	if thread := r.threads[run.threadID]; thread != nil {
+		// Conversation history is no longer persisted separately; it is derived
+		// from the thread's completed runs (each run stores its message + answer)
+		// and rebuilt on recovery.
 		_ = r.stateStore.SaveThread(context.Background(), r.storedThreadLocked(thread))
-		if status == RunCompleted {
-			_ = r.stateStore.AppendMessages(context.Background(), r.tenantID, thread.id, []HistoryMessage{
-				{Role: "user", Content: run.message},
-				{Role: "assistant", Content: answer},
-			})
-		}
 	}
 	snapshot := r.runSnapshotLocked(run)
 	threadID := run.threadID
@@ -1001,6 +1156,11 @@ func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, e
 		run.err = err.Error()
 	} else {
 		run.err = ""
+	}
+	if status == RunFailed && run.journal != nil {
+		// Record where the run stopped so a hard retry can fork just before the
+		// failing step instead of re-running from the beginning.
+		run.failureOffset = run.journal.Length()
 	}
 	thread := r.threads[run.threadID]
 	if thread != nil {
@@ -1174,19 +1334,9 @@ func (r *Runtime) restore(ctx context.Context) error {
 		}
 		r.threads[thread.id] = thread
 	}
-	sort.Slice(state.Messages, func(i, j int) bool {
-		if state.Messages[i].ThreadID == state.Messages[j].ThreadID {
-			return state.Messages[i].Position < state.Messages[j].Position
-		}
-		return state.Messages[i].ThreadID < state.Messages[j].ThreadID
-	})
-	for _, stored := range state.Messages {
-		if thread := r.threads[stored.ThreadID]; thread != nil {
-			thread.history = append(thread.history, HistoryMessage{
-				Role: stored.Role, Content: stored.Content,
-			})
-		}
-	}
+	// Conversation history is derived from completed runs (each stores its
+	// message + answer), accumulated below in run order, rather than loaded from a
+	// separate message store.
 	sort.Slice(state.Runs, func(i, j int) bool {
 		return state.Runs[i].CreatedAt.Before(state.Runs[j].CreatedAt)
 	})
@@ -1230,6 +1380,10 @@ func (r *Runtime) restore(ctx context.Context) error {
 			err:               stored.Error,
 			effectiveManifest: cloneManifest(stored.EffectiveManifest),
 			brainDigest:       brain.Digest,
+			parentRunID:       stored.ParentRunID,
+			childRunIDs:       append([]string(nil), stored.ChildRunIDs...),
+			childSpawnOffsets: append([]int(nil), stored.ChildSpawnOffsets...),
+			failureOffset:     stored.FailureOffset,
 		}
 		if run.revision == 0 {
 			run.revision = 1
@@ -1242,6 +1396,12 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if thread := r.threads[run.threadID]; thread != nil {
 			run.history = append([]HistoryMessage(nil), thread.history...)
 			thread.runIDs = append(thread.runIDs, run.id)
+			if run.status == RunCompleted {
+				thread.history = append(thread.history,
+					HistoryMessage{Role: "user", Content: run.message},
+					HistoryMessage{Role: "assistant", Content: run.answer},
+				)
+			}
 		}
 		if status != stored.Status {
 			if err := r.stateStore.SaveRun(ctx, r.storedRunLocked(run)); err != nil {
@@ -1319,6 +1479,10 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		Error:             run.err,
 		EffectiveManifest: cloneManifest(run.effectiveManifest),
 		BrainDigest:       run.brainDigest,
+		ParentRunID:       run.parentRunID,
+		ChildRunIDs:       append([]string(nil), run.childRunIDs...),
+		ChildSpawnOffsets: append([]int(nil), run.childSpawnOffsets...),
+		FailureOffset:     run.failureOffset,
 	}
 }
 

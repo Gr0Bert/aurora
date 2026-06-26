@@ -6,10 +6,13 @@ type Runtime interface {
 	CreateThread(manifest Manifest) (ThreadSnapshot, error)
 	ListThreads() []ThreadSummary
 	Brains() []BrainArtifact
+	SetBrains(ctx context.Context, brains []BrainSource) error
 	GetThread(threadID string) (ThreadSnapshot, error)
 	CreateRun(threadID string, message string, overrides []CapabilityConfig) (RunSnapshot, error)
 	GetRun(runID string) (RunSnapshot, error)
 	Journal(runID string) ([]JournalEntry, error)
+	CallGraph(runID string) (RunGraphNode, error)
+	ThreadGraph(threadID string) (ThreadGraph, error)
 	Tasks(runID string) ([]TaskSnapshot, error)
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)
 	Stop(runID string) (RunSnapshot, error)
