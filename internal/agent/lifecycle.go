@@ -53,7 +53,7 @@ func newLifecycleDispatcher(
 	}
 }
 
-func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	switch call.Name {
 	case callAgentInput:
 		payload, err := json.Marshal(agentInput{
@@ -63,7 +63,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dis
 			Capabilities: visibleCapabilities(l.next.Capabilities(), l.manifest),
 		})
 		if err != nil {
-			return dispatcher.Failed(err.Error()), nil
+			return dispatcher.Fail(err.Error()), nil
 		}
 		return dispatcher.Result(payload), nil
 	case callAgentFinish:
@@ -71,7 +71,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dis
 		// reads it back from there. Acknowledge so the guest can return.
 		return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
 	default:
-		return l.next.Dispatch(ctx, key, call)
+		return l.next.Dispatch(ctx, key, call, auth)
 	}
 }
 

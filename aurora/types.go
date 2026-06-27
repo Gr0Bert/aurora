@@ -4,7 +4,7 @@ import (
 	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
-	"github.com/aurora-capcompute/capcompute/resolution"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 // DTOs
@@ -72,8 +72,8 @@ type RunContext = agent.RunContext
 
 type TaskScope = task.Scope
 type TaskRecord = task.Record
-type TaskState = task.State
-type Resolution = resolution.Resolution
+type TaskState = dispatcher.Decision
+type Resolution = dispatcher.Authorization
 
 const (
 	TaskStatePending   = task.StatePending

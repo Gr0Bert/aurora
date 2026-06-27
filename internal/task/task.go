@@ -20,8 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"time"
-
-	resolutionpkg "github.com/aurora-capcompute/capcompute/resolution"
 )
 
 type Scope struct {
@@ -31,34 +29,34 @@ type Scope struct {
 	Revision uint64
 }
 
-type State = resolutionpkg.Decision
+type State = dispatcher.Decision
 
 const (
 	StatePending   State = "pending"
-	StateApproved        = resolutionpkg.Approved
-	StateCompleted       = resolutionpkg.Completed
-	StateFailed          = resolutionpkg.Failed
-	StateDenied          = resolutionpkg.Denied
-	StateCancelled       = resolutionpkg.Cancelled
+	StateApproved        = dispatcher.Approved
+	StateCompleted       = dispatcher.Completed
+	StateFailed          = dispatcher.Failed
+	StateDenied          = dispatcher.Denied
+	StateCancelled       = dispatcher.Cancelled
 	StateExpired   State = "expired"
 	StateExecuted  State = "executed"
 )
 
-type Resolution = resolutionpkg.Resolution
+type Resolution = dispatcher.Authorization
 
 type Record struct {
-	Scope           Scope           `json:"scope"`
-	ID              string          `json:"id"`
-	JournalPosition int             `json:"journal_position"`
-	CallHash        string          `json:"call_hash"`
-	Call            dispatcher.Call `json:"call"`
-	Summary         string          `json:"summary"`
-	State           State           `json:"state"`
-	TokenHash       []byte          `json:"-"`
-	Resolution      Resolution      `json:"resolution,omitempty"`
-	CreatedAt       time.Time       `json:"created_at"`
-	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
-	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
+	Scope           Scope            `json:"scope"`
+	ID              string           `json:"id"`
+	JournalPosition int              `json:"journal_position"`
+	CallHash        string           `json:"call_hash"`
+	Call            dispatcher.Call  `json:"call"`
+	Summary         string           `json:"summary"`
+	State           State            `json:"state"`
+	TokenHash       []byte           `json:"-"`
+	Resolution      Resolution       `json:"resolution,omitempty"`
+	CreatedAt       time.Time        `json:"created_at"`
+	ExpiresAt       *time.Time       `json:"expires_at,omitempty"`
+	ResolvedAt      *time.Time       `json:"resolved_at,omitempty"`
 }
 
 type Store interface {
@@ -77,14 +75,6 @@ var (
 	ErrUnauthorized = errors.New("invalid task token")
 )
 
-func WithResolution(ctx context.Context, resolution Resolution) context.Context {
-	return resolutionpkg.WithContext(ctx, resolution)
-}
-
-func ResolutionFromContext(ctx context.Context) (Resolution, bool) {
-	return resolutionpkg.FromContext(ctx)
-}
-
 type Dispatcher[K any] struct {
 	Next          dispatcher.Dispatcher[K]
 	Store         Store
@@ -96,7 +86,7 @@ type Dispatcher[K any] struct {
 	OnTaskCreated func(Record)
 }
 
-func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	if d.Next == nil || d.Store == nil || d.Journal == nil || d.Scope == nil {
 		return dispatcher.Outcome{}, errors.New("task dispatcher is not configured")
 	}
@@ -111,7 +101,7 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Cal
 		return d.resume(ctx, key, record)
 	}
 
-	outcome, err := d.Next.Dispatch(ctx, key, call)
+	outcome, err := d.Next.Dispatch(ctx, key, call, auth)
 	if err != nil || outcome.Kind() != dispatcher.OutcomeYield {
 		return outcome, err
 	}
@@ -148,13 +138,13 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Cal
 
 func (d *Dispatcher[K]) resume(ctx context.Context, key K, record Record) (dispatcher.Outcome, error) {
 	if record.ExpiresAt != nil && !d.now().Before(*record.ExpiresAt) && record.State == StatePending {
-		return dispatcher.Failed("external task expired"), nil
+		return dispatcher.Fail("external task expired"), nil
 	}
 	switch record.State {
 	case StatePending:
 		return dispatcher.Yield(record.ID), nil
 	case StateApproved:
-		outcome, err := d.Next.Dispatch(WithResolution(ctx, record.Resolution), key, record.Call)
+		outcome, err := d.Next.Dispatch(ctx, key, record.Call, record.Resolution)
 		if err == nil && outcome.Kind() != dispatcher.OutcomeYield {
 			_ = d.Store.MarkExecuted(ctx, record.Scope.TenantID, record.ID, d.now())
 		}
@@ -162,15 +152,15 @@ func (d *Dispatcher[K]) resume(ctx context.Context, key K, record Record) (dispa
 	case StateCompleted:
 		return dispatcher.Result(record.Resolution.Data), nil
 	case StateDenied:
-		return dispatcher.Failed(nonempty(record.Resolution.Reason, "external task denied")), nil
+		return dispatcher.Fail(nonempty(record.Resolution.Reason, "external task denied")), nil
 	case StateFailed:
-		return dispatcher.Failed(nonempty(record.Resolution.Reason, "external task failed")), nil
+		return dispatcher.Fail(nonempty(record.Resolution.Reason, "external task failed")), nil
 	case StateCancelled:
-		return dispatcher.Failed("external task cancelled"), nil
+		return dispatcher.Fail("external task cancelled"), nil
 	case StateExpired:
-		return dispatcher.Failed("external task expired"), nil
+		return dispatcher.Fail("external task expired"), nil
 	case StateExecuted:
-		return d.Next.Dispatch(WithResolution(ctx, record.Resolution), key, record.Call)
+		return d.Next.Dispatch(ctx, key, record.Call, record.Resolution)
 	default:
 		return dispatcher.Outcome{}, fmt.Errorf("unsupported task state %q", record.State)
 	}

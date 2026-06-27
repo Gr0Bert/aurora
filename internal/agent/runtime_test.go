@@ -45,9 +45,9 @@ type finalDispatcher struct{}
 
 func (finalDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
-func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	if call.Name != "openai.chat" {
-		return dispatcher.Failed("unsupported call: " + call.Name), nil
+		return dispatcher.Fail("unsupported call: " + call.Name), nil
 	}
 	return dispatcher.Result(json.RawMessage(
 		`{"choices":[{"message":{"content":"{\"actions\":[{\"action\":\"final\",\"content\":{\"answer\":\"done\"}}]}"}}]}`,
@@ -423,9 +423,9 @@ func chatActions(actions string) dispatcher.Outcome {
 	return dispatcher.Result(payload)
 }
 
-func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (cascadeDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	if call.Name != "openai.chat" {
-		return dispatcher.Failed("unsupported call: " + call.Name), nil
+		return dispatcher.Fail("unsupported call: " + call.Name), nil
 	}
 	var req struct {
 		Messages []struct {
@@ -585,9 +585,9 @@ type failingChildDispatcher struct{}
 
 func (failingChildDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
-func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	if call.Name != "openai.chat" {
-		return dispatcher.Failed("unsupported call: " + call.Name), nil
+		return dispatcher.Fail("unsupported call: " + call.Name), nil
 	}
 	var req struct {
 		Messages []struct {
@@ -690,7 +690,7 @@ func (d *failThenSucceedDispatcher) Capabilities() []dispatcher.Capability {
 	}}
 }
 
-func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
 	switch call.Name {
 	case "tool.x":
 		return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
@@ -722,7 +722,7 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, ca
 		}
 		return chatActions(`{"actions":[{"action":"final","content":{"answer":"recovered"}}]}`), nil
 	default:
-		return dispatcher.Failed("unsupported call: " + call.Name), nil
+		return dispatcher.Fail("unsupported call: " + call.Name), nil
 	}
 }
 

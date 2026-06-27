@@ -47,7 +47,7 @@ func decodeOutcome(jo JournalOutcome) dispatcher.Outcome {
 	case dispatcher.OutcomeYield:
 		return dispatcher.Yield(jo.Message)
 	default:
-		return dispatcher.Failed(jo.Message)
+		return dispatcher.Fail(jo.Message)
 	}
 }
 

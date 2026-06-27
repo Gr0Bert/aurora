@@ -39,7 +39,7 @@ func newDelegationRouter(next dispatcher.Dispatcher[RunContext], children []Chil
 	return &delegationRouter{next: next, children: m}
 }
 
-func (r *delegationRouter) Dispatch(ctx context.Context, key RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
+func (r *delegationRouter) Dispatch(ctx context.Context, key RunContext, call dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
 	if strings.HasPrefix(call.Name, "call.") {
 		childName := call.Name[len("call."):]
 		child, ok := r.children[childName]
@@ -47,7 +47,7 @@ func (r *delegationRouter) Dispatch(ctx context.Context, key RunContext, call di
 			return child.dispatch(ctx, key, call)
 		}
 	}
-	return r.next.Dispatch(ctx, key, call)
+	return r.next.Dispatch(ctx, key, call, auth)
 }
 
 func (r *delegationRouter) Capabilities() []dispatcher.Capability {
@@ -66,13 +66,13 @@ func (c *delegationChild) onChildFailure(parentRunID string, err error) (dispatc
 	if c.manifest.OnFailure == OnFailurePropagate {
 		c.runtime.requestRunFailure(parentRunID, fmt.Errorf("child %q failed: %w", c.manifest.Name, err))
 	}
-	return dispatcher.Failed(err.Error()), nil
+	return dispatcher.Fail(err.Error()), nil
 }
 
 func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
 	var args delegateArgs
 	if err := json.Unmarshal(call.Args, &args); err != nil {
-		return dispatcher.Failed(fmt.Sprintf("decode delegation args: %v", err)), nil
+		return dispatcher.Fail(fmt.Sprintf("decode delegation args: %v", err)), nil
 	}
 
 	// Deep cascade resume: when the parent run is being restarted, re-execution
@@ -82,7 +82,7 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	// restart down its own subtree.
 	if childID, threadID, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
 		if _, err := c.runtime.Retry(childID, RetryRestart, nil); err != nil {
-			return dispatcher.Failed(fmt.Sprintf("cascade retry child: %v", err)), nil
+			return dispatcher.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
 		answer, err := c.runtime.waitForCompletion(ctx, childID, threadID)
 		if err != nil {
@@ -98,11 +98,11 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
 	thread, err := c.runtime.CreateThread(childManifest)
 	if err != nil {
-		return dispatcher.Failed(fmt.Sprintf("create child thread: %v", err)), nil
+		return dispatcher.Fail(fmt.Sprintf("create child thread: %v", err)), nil
 	}
 	run, err := c.runtime.createChildRun(parent.RunID, thread.ID, args.Message)
 	if err != nil {
-		return dispatcher.Failed(fmt.Sprintf("create child run: %v", err)), nil
+		return dispatcher.Fail(fmt.Sprintf("create child run: %v", err)), nil
 	}
 	answer, err := c.runtime.waitForCompletion(ctx, run.ID, thread.ID)
 	if err != nil {

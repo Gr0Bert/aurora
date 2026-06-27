@@ -124,13 +124,12 @@ type approvalDispatcher struct {
 
 func (*approvalDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
-func (d *approvalDispatcher) Dispatch(ctx context.Context, _ run, _ dispatcher.Call) (dispatcher.Outcome, error) {
-	resolution, ok := task.ResolutionFromContext(ctx)
-	if !ok {
+func (d *approvalDispatcher) Dispatch(_ context.Context, _ run, _ dispatcher.Call, auth dispatcher.Authorization) (dispatcher.Outcome, error) {
+	if auth.Decision == "" {
 		return dispatcher.Yield("approve test operation"), nil
 	}
-	if resolution.Decision != task.StateApproved {
-		return dispatcher.Failed("not approved"), nil
+	if auth.Decision != task.StateApproved {
+		return dispatcher.Fail("not approved"), nil
 	}
 	d.executions++
 	return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
@@ -155,7 +154,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 	}
 	call := dispatcher.Call{Name: "internet.read", Args: json.RawMessage(`{"url":"https://example.com"}`)}
 
-	outcome, err := build().Dispatch(context.Background(), run{}, call)
+	outcome, err := build().Dispatch(context.Background(), run{}, call, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("initial dispatch: %v", err)
 	}
@@ -176,7 +175,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("resolve: %v", err)
 	}
 
-	outcome, err = build().Dispatch(context.Background(), run{}, call)
+	outcome, err = build().Dispatch(context.Background(), run{}, call, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("resumed dispatch: %v", err)
 	}
@@ -184,7 +183,7 @@ func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {
 		t.Fatalf("resumed outcome = %s, executions=%d", outcome.Kind(), next.executions)
 	}
 
-	outcome, err = build().Dispatch(context.Background(), run{}, call)
+	outcome, err = build().Dispatch(context.Background(), run{}, call, dispatcher.Authorization{})
 	if err != nil {
 		t.Fatalf("replayed dispatch: %v", err)
 	}
