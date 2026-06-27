@@ -1,17 +1,17 @@
 package agent
 
 import (
-	"capcompute"
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"encoding/json"
 	"errors"
 	"sync"
 	"time"
 
-	"aurora-capcompute/internal/eventlog"
-	internalhost "aurora-capcompute/internal/host"
-	"aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
 var (

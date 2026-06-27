@@ -5,15 +5,15 @@ package agent
 // each state change to the durable log and live watchers.
 
 import (
-	"capcompute"
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"errors"
 	"fmt"
 	"time"
 
-	"aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 )
 
 // Run execution: the play goroutine, terminal-state finishing, and the event

@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"aurora-capcompute/internal/eventlog"
-	"aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
 // eventTaskStore implements task.Store over the append-only event log. It keeps

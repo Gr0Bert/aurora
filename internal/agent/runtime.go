@@ -12,9 +12,9 @@
 package agent
 
 import (
-	"capcompute"
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -24,8 +24,8 @@ import (
 	"sync"
 	"time"
 
-	internalhost "aurora-capcompute/internal/host"
-	"aurora-capcompute/internal/task"
+	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 
 	extism "github.com/extism/go-sdk"
 )

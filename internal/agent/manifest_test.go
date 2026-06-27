@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 type testDispatchers struct {

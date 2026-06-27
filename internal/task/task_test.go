@@ -1,10 +1,10 @@
 package task_test
 
 import (
-	"aurora-capcompute/internal/task"
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
@@ -121,6 +121,8 @@ func (j *journal) Length() int { return len(j.records) }
 type approvalDispatcher struct {
 	executions int
 }
+
+func (*approvalDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
 func (d *approvalDispatcher) Dispatch(ctx context.Context, _ run, _ dispatcher.Call) (dispatcher.Outcome, error) {
 	resolution, ok := task.ResolutionFromContext(ctx)

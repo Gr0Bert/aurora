@@ -13,10 +13,10 @@ import (
 	"errors"
 	"time"
 
-	"aurora-capcompute/internal/task"
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 )
 
 type Factory[K any] struct {

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 const (

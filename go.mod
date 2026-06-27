@@ -1,10 +1,10 @@
-module aurora-capcompute
+module github.com/aurora-capcompute/aurora-capcompute
 
 go 1.26
 
 require (
-	aurora-dispatchers v0.0.0
-	capcompute v0.0.0
+	github.com/aurora-capcompute/aurora-dispatchers v0.0.0-00010101000000-000000000000
+	github.com/aurora-capcompute/capcompute v0.0.0-00010101000000-000000000000
 	github.com/extism/go-sdk v1.7.1
 )
 
@@ -19,6 +19,4 @@ require (
 	google.golang.org/protobuf v1.34.2 // indirect
 )
 
-replace capcompute => ../capcompute
 
-replace aurora-dispatchers => ../aurora-dispatchers

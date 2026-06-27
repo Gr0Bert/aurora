@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,7 +38,7 @@ func (d *progressDispatcher) Dispatch(ctx context.Context, key RunContext, call 
 }
 
 func (d *progressDispatcher) Capabilities() []dispatcher.Capability {
-	return dispatcher.Capabilities(d.next)
+	return d.next.Capabilities()
 }
 
 func hasCapability(manifest Manifest, name string) bool {

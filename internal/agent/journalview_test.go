@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 // rec builds a capability call whose outcome is a JSON-string result (capability

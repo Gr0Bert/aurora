@@ -5,13 +5,13 @@ package agent
 // helpers (titles, visible capabilities, defensive copies) they lean on.
 
 import (
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"crypto/rand"
 	"encoding/hex"
 	"strings"
 	"time"
 
-	"aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
 )
 
 // Read projections: building API snapshots and StoredThread/StoredRun event

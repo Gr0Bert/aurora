@@ -1,7 +1,7 @@
 package agent
 
 import (
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -51,7 +51,7 @@ func (r *delegationRouter) Dispatch(ctx context.Context, key RunContext, call di
 }
 
 func (r *delegationRouter) Capabilities() []dispatcher.Capability {
-	caps := dispatcher.Capabilities(r.next)
+	caps := r.next.Capabilities()
 	for name, child := range r.children {
 		caps = append(caps, delegationCapability(name, child.manifest))
 	}

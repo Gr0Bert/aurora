@@ -10,8 +10,8 @@
 package task
 
 import (
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -21,7 +21,7 @@ import (
 	"fmt"
 	"time"
 
-	resolutionpkg "aurora-dispatchers/resolution"
+	resolutionpkg "github.com/aurora-capcompute/aurora-dispatchers/resolution"
 )
 
 type Scope struct {
@@ -177,7 +177,7 @@ func (d *Dispatcher[K]) resume(ctx context.Context, key K, record Record) (dispa
 }
 
 func (d *Dispatcher[K]) Capabilities() []dispatcher.Capability {
-	return dispatcher.Capabilities(d.Next)
+	return d.Next.Capabilities()
 }
 
 func HashCall(call dispatcher.Call) string {

@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 )
 
 // Agent lifecycle host calls. The guest fetches its input and reports its answer
@@ -60,7 +60,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dis
 			Message:      l.message,
 			History:      l.history,
 			SystemPrompt: l.systemPrompt,
-			Capabilities: visibleCapabilities(dispatcher.Capabilities(l.next), l.manifest),
+			Capabilities: visibleCapabilities(l.next.Capabilities(), l.manifest),
 		})
 		if err != nil {
 			return dispatcher.Failed(err.Error()), nil
@@ -76,7 +76,7 @@ func (l *lifecycleDispatcher) Dispatch(ctx context.Context, key RunKey, call dis
 }
 
 func (l *lifecycleDispatcher) Capabilities() []dispatcher.Capability {
-	return dispatcher.Capabilities(l.next)
+	return l.next.Capabilities()
 }
 
 // answerFromJournal reads a completed run's answer from the final journal record,

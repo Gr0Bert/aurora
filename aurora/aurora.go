@@ -13,7 +13,7 @@ package aurora
 import (
 	"context"
 
-	"aurora-capcompute/internal/agent"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
 )
 
 func NewRuntime(ctx context.Context, config Config) (Runtime, error) {

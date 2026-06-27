@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"aurora-capcompute/internal/eventlog"
-	"capcompute"
-	"capcompute/dispatcher"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 type runtimeDispatchers struct {
@@ -42,6 +42,8 @@ func (*runtimeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error {
 }
 
 type finalDispatcher struct{}
+
+func (finalDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
 func (finalDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
 	if call.Name != "openai.chat" {
@@ -412,6 +414,8 @@ func (cascadeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { retur
 
 type cascadeDispatcher struct{}
 
+func (cascadeDispatcher) Capabilities() []dispatcher.Capability { return nil }
+
 func chatActions(actions string) dispatcher.Outcome {
 	payload, _ := json.Marshal(map[string]any{
 		"choices": []any{map[string]any{"message": map[string]any{"content": actions}}},
@@ -578,6 +582,8 @@ func (failingChildDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ 
 func (failingChildDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
 
 type failingChildDispatcher struct{}
+
+func (failingChildDispatcher) Capabilities() []dispatcher.Capability { return nil }
 
 func (failingChildDispatcher) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call) (dispatcher.Outcome, error) {
 	if call.Name != "openai.chat" {

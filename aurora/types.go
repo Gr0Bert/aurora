@@ -1,10 +1,10 @@
 package aurora
 
 import (
-	"aurora-capcompute/internal/agent"
-	"aurora-capcompute/internal/eventlog"
-	"aurora-capcompute/internal/task"
-	"aurora-dispatchers/resolution"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/agent"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/aurora-dispatchers/resolution"
 )
 
 // DTOs

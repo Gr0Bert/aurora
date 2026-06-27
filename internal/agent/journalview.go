@@ -9,10 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"aurora-capcompute/internal/eventlog"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 
-	"capcompute/dispatcher"
-	"capcompute/dispatcher/replay/tape/journaled"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 )
 
 // Capability-journal events. The journal is a projection of the same append-only
