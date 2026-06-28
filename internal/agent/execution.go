@@ -221,10 +221,20 @@ func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, e
 	thread := r.threads[run.threadID]
 	if thread != nil {
 		if status != RunYielded && status != RunWaitingTask && thread.activeRunID == run.id {
-			thread.activeRunID = ""
+			// When a child run finishes in the parent's thread, return activeRunID to
+			// the parent so the parent goroutine can resume on the same thread.
+			if run.parentRunID != "" {
+				if parent := r.runs[run.parentRunID]; parent != nil && parent.threadID == run.threadID {
+					thread.activeRunID = run.parentRunID
+				} else {
+					thread.activeRunID = ""
+				}
+			} else {
+				thread.activeRunID = ""
+			}
 		}
 		thread.updatedAt = now
-		if status == RunCompleted {
+		if status == RunCompleted && run.parentRunID == "" {
 			thread.history = append(thread.history,
 				HistoryMessage{Role: "user", Content: run.message},
 				HistoryMessage{Role: "assistant", Content: answer},

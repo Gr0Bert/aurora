@@ -561,11 +561,24 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 		return RunSnapshot{}, fmt.Errorf("%w: run %s cannot retry from %s", ErrConflict, runID, run.status)
 	}
 	thread := r.threads[run.threadID]
-	if len(thread.runIDs) == 0 || thread.runIDs[len(thread.runIDs)-1] != run.id {
-		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: only the latest thread run can be retried", ErrConflict)
+	if run.parentRunID == "" {
+		// Root runs may only be retried if no later user-initiated run has arrived.
+		// Child runs that were added to the same thread by delegation do not count.
+		lastRootID := ""
+		for i := len(thread.runIDs) - 1; i >= 0; i-- {
+			if r.runs[thread.runIDs[i]] != nil && r.runs[thread.runIDs[i]].parentRunID == "" {
+				lastRootID = thread.runIDs[i]
+				break
+			}
+		}
+		if lastRootID == "" || lastRootID != run.id {
+			r.mu.Unlock()
+			return RunSnapshot{}, fmt.Errorf("%w: only the latest thread run can be retried", ErrConflict)
+		}
 	}
-	if thread.activeRunID != "" && thread.activeRunID != run.id {
+	// Allow cascade retry of a child while its parent holds activeRunID.
+	if thread.activeRunID != "" && thread.activeRunID != run.id &&
+		(run.parentRunID == "" || thread.activeRunID != run.parentRunID) {
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
 	}

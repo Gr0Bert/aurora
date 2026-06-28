@@ -98,16 +98,12 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	}
 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
-	slog.Info("spawning fresh child thread", "parent_run", parent.RunID, "child", c.manifest.Name)
-	thread, err := c.runtime.CreateThread(nil)
-	if err != nil {
-		return dispatcher.Fail(fmt.Sprintf("create child thread: %v", err)), nil
-	}
-	run, err := c.runtime.createChildRun(parent.RunID, thread.ID, args.Message, childManifest)
+	slog.Info("spawning child run in parent thread", "parent_run", parent.RunID, "child", c.manifest.Name)
+	run, err := c.runtime.createChildRun(parent.RunID, parent.ThreadID, args.Message, childManifest)
 	if err != nil {
 		return dispatcher.Fail(fmt.Sprintf("create child run: %v", err)), nil
 	}
-	answer, err := c.runtime.waitForCompletion(ctx, run.ID, thread.ID)
+	answer, err := c.runtime.waitForCompletion(ctx, run.ID, parent.ThreadID)
 	if err != nil {
 		return c.onChildFailure(parent.RunID, err)
 	}
@@ -245,7 +241,7 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
 	}
-	if thread.activeRunID != "" {
+	if thread.activeRunID != "" && thread.activeRunID != parentRunID {
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
 	}
@@ -273,12 +269,13 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 	if len(thread.runIDs) == 1 {
 		thread.title = threadTitle(message)
 	}
+	prevActiveRunID := thread.activeRunID
 	thread.activeRunID = runID
 	thread.updatedAt = now
 	if err := r.appendRun(run); err != nil {
 		delete(r.runs, runID)
 		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
-		thread.activeRunID = ""
+		thread.activeRunID = prevActiveRunID
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}
