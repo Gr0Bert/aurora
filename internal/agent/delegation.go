@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"log/slog"
 	"strings"
 	"time"
+
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
 
 type delegationRouter struct {
@@ -96,6 +98,7 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	}
 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
+	slog.Info("spawning fresh child thread", "parent_run", parent.RunID, "child", c.manifest.Name)
 	thread, err := c.runtime.CreateThread(childManifest, nil)
 	if err != nil {
 		return dispatcher.Fail(fmt.Sprintf("create child thread: %v", err)), nil
@@ -188,13 +191,25 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 	defer r.mu.Unlock()
 	parent := r.runs[parentRunID]
 	if parent == nil || !parent.cascade || parent.cascadeCursor >= len(parent.childRunIDs) {
+		if parent != nil {
+			slog.Debug("cascade skip: off or exhausted",
+				"run", parentRunID,
+				"cascade", parent.cascade,
+				"cursor", parent.cascadeCursor,
+				"children", len(parent.childRunIDs),
+			)
+		}
 		return "", "", false
 	}
 	childID = parent.childRunIDs[parent.cascadeCursor]
 	parent.cascadeCursor++
 	child := r.runs[childID]
 	if child == nil {
-		// Recorded child is no longer resident; fall back to spawning fresh.
+		slog.Warn("cascade child not resident; spawning fresh",
+			"parent_run", parentRunID,
+			"child_run", childID,
+			"cursor", parent.cascadeCursor-1,
+		)
 		return "", "", false
 	}
 	return childID, child.threadID, true

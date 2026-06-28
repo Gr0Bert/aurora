@@ -618,15 +618,20 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 		if isSessionPreserved {
 			run.cascade = false
 		} else {
-			// Soft restart: fork at the end of the journal so existing entries are
-			// replayed from history under their original revision; any new decisions
-			// (extensions or failure-recovery steps) land under the new revision.
 			j, ok := run.journal.(*logJournal)
 			if !ok {
 				r.mu.Unlock()
 				return RunSnapshot{}, fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
 			}
-			if err := r.forkJournalLocked(run, j.Length()); err != nil {
+			// For a failed run, fork just before the failing step so the brain
+			// re-attempts it live under the bumped revision. For stopped/interrupted
+			// runs there is no specific failure point, so fork at the end of the
+			// journal and let the brain continue from there.
+			forkOffset := j.Length()
+			if run.status == RunFailed && run.failureOffset > 0 {
+				forkOffset = run.failureOffset - 1
+			}
+			if err := r.forkJournalLocked(run, forkOffset); err != nil {
 				r.mu.Unlock()
 				return RunSnapshot{}, err
 			}
