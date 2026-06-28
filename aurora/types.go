@@ -22,7 +22,6 @@ type JournalOutcome = agent.JournalOutcome
 type RunGraphNode = agent.RunGraphNode
 type ThreadGraph = agent.ThreadGraph
 type ThreadGraphRun = agent.ThreadGraphRun
-type RevisionView = agent.RevisionView
 type Event = agent.Event
 type JournalEvent = agent.JournalEvent
 type ProgressEvent = agent.ProgressEvent

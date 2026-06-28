@@ -24,11 +24,11 @@ func (r *Runtime) restore(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		journals, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(scope.ThreadID))
+		journals, histories, err := foldJournals(events, r.log, scope, r.journalNow, r.journalAppendPublisher(scope.ThreadID))
 		if err != nil {
 			return err
 		}
-		if err := r.restoreThread(proj, journals); err != nil {
+		if err := r.restoreThread(proj, journals, histories); err != nil {
 			return err
 		}
 		r.tasks.seed(proj.TaskList())
@@ -40,7 +40,7 @@ func (r *Runtime) restore(ctx context.Context) error {
 // thread, its runs (in creation order, deriving conversation history from
 // completed runs), and attaches each run's journal revision. Runs left mid-flight
 // by a crash are marked interrupted and re-recorded.
-func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]*logJournal) error {
+func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]*logJournal, histories map[string]*runHistory) error {
 	stored := proj.Thread
 	if stored.ID == "" {
 		return nil
@@ -53,7 +53,13 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		return err
 	}
 	if _, err := r.brains.Resolve(manifest.Brain); err != nil {
-		return err
+		// Brain not yet registered (dynamic brain loading: SetBrains called after
+		// restore). Skip the thread; it will be unreachable until the brain is
+		// loaded. This also naturally discards threads from a previous brain ID
+		// scheme that no longer matches any registered brain.
+		slog.Info("skipping thread restore: brain not registered",
+			"thread_id", stored.ID, "brain", manifest.Brain)
+		return nil
 	}
 	thread := &threadState{
 		id:          stored.ID,
@@ -82,7 +88,9 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		}
 		brain, err := r.brains.Resolve(em.Brain)
 		if err != nil {
-			return err
+			slog.Info("skipping run restore: brain not registered",
+				"run_id", sr.ID, "brain", em.Brain)
+			continue
 		}
 		if sr.BrainDigest != "" && sr.BrainDigest != brain.Digest {
 			slog.Info("skipping run with outdated brain digest",
@@ -120,7 +128,18 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		if j := journals[run.id][run.revision]; j != nil {
 			run.journal = j
 		} else {
-			run.journal, err = r.newJournal(run)
+			// No entries logged for this revision yet (run crashed before any tool
+			// call). Share the existing history so the replay can serve the shared
+			// prefix; forkOffset is derived from the stored failure offset.
+			history := histories[run.id]
+			if history == nil {
+				history = newRunHistory()
+			}
+			forkOffset := 0
+			if sr.FailureOffset > 0 {
+				forkOffset = sr.FailureOffset - 1
+			}
+			run.journal, err = r.newJournal(run, history, forkOffset)
 			if err != nil {
 				return err
 			}

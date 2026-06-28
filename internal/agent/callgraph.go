@@ -2,21 +2,16 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"sort"
+
+	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 )
 
-// RevisionView is one copy-on-write revision of a run: its fork metadata and the
-// full (parent-resolved) journal of calls and outcomes recorded for it.
-type RevisionView struct {
-	Revision   uint64         `json:"revision"`
-	Forked     bool           `json:"forked"`
-	ForkParent uint64         `json:"fork_parent,omitempty"`
-	ForkOffset int            `json:"fork_offset"`
-	Entries    []JournalEntry `json:"entries"`
-}
-
-// ThreadGraphRun is a run within a thread graph: its metadata, the child runs it
-// delegated to, and every revision it has been through.
+// ThreadGraphRun is a run within a thread graph: its metadata and the flat
+// journal of every (position, revision) entry ever written. The fork structure
+// is derivable from duplicate positions with different revision numbers.
 type ThreadGraphRun struct {
 	RunID           string         `json:"run_id"`
 	Message         string         `json:"message"`
@@ -27,33 +22,20 @@ type ThreadGraphRun struct {
 	Attempt         int            `json:"attempt"`
 	CurrentRevision uint64         `json:"current_revision"`
 	ChildRunIDs     []string       `json:"child_run_ids,omitempty"`
-	Revisions       []RevisionView `json:"revisions"`
+	Entries         []JournalEntry `json:"entries"`
 }
 
 // ThreadGraph projects a whole thread for exploration: its runs in order, each
-// with its delegation links and full revision history.
+// with its complete flat entry history across all revisions.
 type ThreadGraph struct {
 	ThreadID string           `json:"thread_id"`
 	Title    string           `json:"title"`
 	Runs     []ThreadGraphRun `json:"runs"`
 }
 
-// runRevisionMeta is a lock-free snapshot of a run used to read its journals
-// without holding the runtime lock during store I/O.
-type runRevisionMeta struct {
-	id          string
-	message     string
-	parentRunID string
-	status      RunStatus
-	answer      string
-	err         string
-	attempt     int
-	revision    uint64
-	childRunIDs []string
-}
-
-// ThreadGraph builds the execution graph of a thread across all revisions of all
-// its runs, reading each revision's journal from the state store.
+// ThreadGraph builds the execution graph of a thread by reading each run's
+// capability.recorded events directly from the log. The flat entry list carries
+// per-entry revision numbers so the caller can reconstruct the fork graph.
 func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 	r.mu.Lock()
 	thread := r.threads[threadID]
@@ -62,29 +44,75 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 		return ThreadGraph{}, fmt.Errorf("%w: thread %s", ErrNotFound, threadID)
 	}
 	graph := ThreadGraph{ThreadID: thread.id, Title: thread.title}
-	metas := make([]runRevisionMeta, 0, len(thread.runIDs))
+	type runMeta struct {
+		id, message, parentRunID string
+		status                   RunStatus
+		answer, err              string
+		attempt                  int
+		currentRevision          uint64
+		childRunIDs              []string
+	}
+	metas := make([]runMeta, 0, len(thread.runIDs))
 	for _, runID := range thread.runIDs {
 		run := r.runs[runID]
 		if run == nil {
 			continue
 		}
-		metas = append(metas, runRevisionMeta{
-			id:          run.id,
-			message:     run.message,
-			parentRunID: run.parentRunID,
-			status:      run.status,
-			answer:      run.answer,
-			err:         run.err,
-			attempt:     run.attempt,
-			revision:    run.revision,
+		metas = append(metas, runMeta{
+			id: run.id, message: run.message, parentRunID: run.parentRunID,
+			status: run.status, answer: run.answer, err: run.err,
+			attempt: run.attempt, currentRevision: run.revision,
 			childRunIDs: append([]string(nil), run.childRunIDs...),
 		})
 	}
 	tenantID := r.tenantID
 	r.mu.Unlock()
 
+	ctx := context.Background()
+	events, err := r.log.Read(ctx, eventlog.Scope{TenantID: tenantID, ThreadID: threadID}, 0)
+	if err != nil {
+		return ThreadGraph{}, err
+	}
+
+	// Build a flat entry list per run. Duplicates (same position + revision)
+	// are last-write-wins, which should never happen in a correct log.
+	type entryKey struct {
+		position int
+		revision uint64
+	}
+	allEntries := map[string]map[entryKey]JournalEntry{} // run → key → entry
+
+	for _, ev := range events {
+		if ev.Kind != evCapability {
+			continue
+		}
+		var cd capabilityData
+		if err := json.Unmarshal(ev.Data, &cd); err != nil {
+			return ThreadGraph{}, fmt.Errorf("decode capability.recorded: %w", err)
+		}
+		if allEntries[ev.Run] == nil {
+			allEntries[ev.Run] = make(map[entryKey]JournalEntry)
+		}
+		allEntries[ev.Run][entryKey{cd.Position, ev.Rev}] = JournalEntry{
+			Index:    cd.Position,
+			Revision: ev.Rev,
+			Call:     cd.Call,
+			Outcome:  cd.Outcome,
+		}
+	}
+
 	for _, meta := range metas {
-		runView := ThreadGraphRun{
+		entries := make([]JournalEntry, 0, len(allEntries[meta.id]))
+		for _, e := range allEntries[meta.id] {
+			entries = append(entries, e)
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].Index != entries[j].Index {
+				return entries[i].Index < entries[j].Index
+			}
+			return entries[i].Revision < entries[j].Revision
+		})
+		graph.Runs = append(graph.Runs, ThreadGraphRun{
 			RunID:           meta.id,
 			Message:         meta.message,
 			ParentRunID:     meta.parentRunID,
@@ -92,60 +120,12 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 			Answer:          meta.answer,
 			Error:           meta.err,
 			Attempt:         meta.attempt,
-			CurrentRevision: meta.revision,
+			CurrentRevision: meta.currentRevision,
 			ChildRunIDs:     meta.childRunIDs,
-		}
-		for rev := uint64(1); rev <= meta.revision; rev++ {
-			scope := RunContext{TenantID: tenantID, ThreadID: threadID, RunID: meta.id, Revision: rev}
-			view, err := r.revisionView(scope)
-			if err != nil {
-				return ThreadGraph{}, err
-			}
-			runView.Revisions = append(runView.Revisions, view)
-		}
-		graph.Runs = append(graph.Runs, runView)
-	}
-	return graph, nil
-}
-
-func (r *Runtime) revisionView(scope RunContext) (RevisionView, error) {
-	ctx := context.Background()
-	stream := r.scope(scope.ThreadID)
-	events, err := r.log.Read(ctx, stream, 0)
-	if err != nil {
-		return RevisionView{}, err
-	}
-	journals, err := foldJournals(events, r.log, stream, r.journalNow, nil)
-	if err != nil {
-		return RevisionView{}, err
-	}
-	view := RevisionView{Revision: scope.Revision}
-	journal := journals[scope.RunID][scope.Revision]
-	if journal == nil {
-		return view, nil
-	}
-	if journal.parent != nil {
-		view.Forked = true
-		view.ForkOffset = journal.offset
-		view.ForkParent = journal.parent.rev
-	}
-	length := journal.Length()
-	for i := 0; i < length; i++ {
-		record, err := journal.Load(i)
-		if err != nil {
-			return RevisionView{}, err
-		}
-		view.Entries = append(view.Entries, JournalEntry{
-			Index: i,
-			Call:  record.Call,
-			Outcome: JournalOutcome{
-				Status:  record.Outcome.Kind(),
-				Result:  record.Outcome.Result(),
-				Message: record.Outcome.Message(),
-			},
+			Entries:         entries,
 		})
 	}
-	return view, nil
+	return graph, nil
 }
 
 // RunGraphNode is a node in the projected call graph: a run together with the
@@ -163,8 +143,7 @@ type RunGraphNode struct {
 }
 
 // CallGraph projects a run and its delegated child runs (recursively) into a
-// tree, using the recorded parent/child links. It reflects the current state of
-// runs resident in the runtime.
+// tree, using the recorded parent/child links.
 func (r *Runtime) CallGraph(runID string) (RunGraphNode, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -174,8 +153,6 @@ func (r *Runtime) CallGraph(runID string) (RunGraphNode, error) {
 	return r.callGraphLocked(runID, make(map[string]bool)), nil
 }
 
-// callGraphLocked builds the subtree rooted at runID. The visited set guards
-// against revisiting a run, so a malformed cycle cannot cause infinite recursion.
 func (r *Runtime) callGraphLocked(runID string, visited map[string]bool) RunGraphNode {
 	run := r.runs[runID]
 	if run == nil || visited[runID] {

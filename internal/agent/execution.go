@@ -251,13 +251,14 @@ func (r *Runtime) journalNow() time.Time { return r.now().UTC() }
 
 // journalAppendPublisher publishes a journal.appended event for a thread when a
 // capability record is appended to one of its runs' journals.
-func (r *Runtime) journalAppendPublisher(threadID string) func(string, int, dispatcher.Call, dispatcher.Outcome) {
-	return func(runID string, index int, call dispatcher.Call, outcome dispatcher.Outcome) {
+func (r *Runtime) journalAppendPublisher(threadID string) func(string, int, uint64, dispatcher.Call, dispatcher.Outcome) {
+	return func(runID string, index int, revision uint64, call dispatcher.Call, outcome dispatcher.Outcome) {
 		r.publish(threadID, Event{
 			Type: "journal.appended",
 			Data: JournalEvent{
 				RunID:         runID,
 				Index:         index,
+				Revision:      revision,
 				Call:          call.Name,
 				OutcomeStatus: outcome.Kind(),
 				OutcomeSize:   len(outcome.Result()),
@@ -286,9 +287,9 @@ func (r *Runtime) appendRun(run *runState) error {
 	return err
 }
 
-func (r *Runtime) newJournal(run *runState) (journaled.Journal, error) {
+func (r *Runtime) newJournal(run *runState, history *runHistory, forkOffset int) (journaled.Journal, error) {
 	return newLogJournal(r.log, r.scope(run.threadID), run.id, run.revision,
-		r.journalNow, r.journalAppendPublisher(run.threadID)), nil
+		history, forkOffset, r.journalNow, r.journalAppendPublisher(run.threadID)), nil
 }
 
 func (r *Runtime) publish(threadID string, event Event) {

@@ -35,7 +35,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 	log := eventlog.NewMemory()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
-	j := newLogJournal(log, scope, "run1", 1, now, nil)
+	j := newLogJournal(log, scope, "run1", 1, newRunHistory(), 0, now, nil)
 
 	for i, n := range []string{"a", "b", "c"} {
 		call, outcome := rec(n, n)
@@ -49,7 +49,7 @@ func TestLogJournalLinearRoundTrip(t *testing.T) {
 
 	// Rebuild purely from the event stream and confirm identical records.
 	events, _ := log.Read(context.Background(), scope, 0)
-	journals, err := foldJournals(events, log, scope, now, nil)
+	journals, _, err := foldJournals(events, log, scope, now, nil)
 	if err != nil {
 		t.Fatalf("fold journals: %v", err)
 	}
@@ -63,20 +63,18 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	log := eventlog.NewMemory()
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th"}
 	now := func() time.Time { return time.Unix(0, 0).UTC() }
+	history := newRunHistory()
 
-	base := newLogJournal(log, scope, "run1", 1, now, nil)
+	base := newLogJournal(log, scope, "run1", 1, history, 0, now, nil)
 	for i, n := range []string{"a", "b", "c"} {
 		call, outcome := rec(n, n)
 		if err := base.Store(i, call, outcome); err != nil {
 			t.Fatal(err)
 		}
 	}
-	// Fork rev 2 sharing the first two records [a, b], then append a different
-	// third record.
-	child, err := base.fork(2, 2)
-	if err != nil {
-		t.Fatalf("fork: %v", err)
-	}
+	// Create rev 2 sharing the first two records [a, b] (forkOffset=2),
+	// then append a different third record.
+	child := newLogJournal(log, scope, "run1", 2, history, 2, now, nil)
 	if child.Length() != 2 {
 		t.Fatalf("forked length = %d, want 2 (shared prefix)", child.Length())
 	}
@@ -87,18 +85,18 @@ func TestLogJournalForkSharesPrefixThenDiverges(t *testing.T) {
 	if got := loadAll(t, child); len(got) != 3 || got[0] != `a="a"` || got[1] != `b="b"` || got[2] != `c2="c2"` {
 		t.Fatalf("forked journal = %v", got)
 	}
-	// The parent revision is untouched.
-	if got := loadAll(t, base); got[2] != "c=\"c\"" {
+	// The base revision is untouched.
+	if got := loadAll(t, base); got[2] != `c="c"` {
 		t.Fatalf("parent mutated: %v", got)
 	}
 
 	// Rebuild both revisions from the stream.
 	events, _ := log.Read(context.Background(), scope, 0)
-	journals, err := foldJournals(events, log, scope, now, nil)
+	journals, _, err := foldJournals(events, log, scope, now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := loadAll(t, journals["run1"][1]); got[2] != "c=\"c\"" {
+	if got := loadAll(t, journals["run1"][1]); got[2] != `c="c"` {
 		t.Fatalf("rebuilt rev1 = %v", got)
 	}
 	if got := loadAll(t, journals["run1"][2]); len(got) != 3 || got[2] != `c2="c2"` {

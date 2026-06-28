@@ -209,9 +209,10 @@ type TaskSnapshot struct {
 }
 
 type JournalEntry struct {
-	Index   int             `json:"index"`
-	Call    dispatcher.Call `json:"call"`
-	Outcome JournalOutcome  `json:"outcome"`
+	Index    int             `json:"index"`
+	Revision uint64          `json:"revision"`
+	Call     dispatcher.Call `json:"call"`
+	Outcome  JournalOutcome  `json:"outcome"`
 }
 
 type JournalOutcome struct {
@@ -228,6 +229,7 @@ type Event struct {
 type JournalEvent struct {
 	RunID         string                 `json:"run_id"`
 	Index         int                    `json:"index"`
+	Revision      uint64                 `json:"revision"`
 	Call          string                 `json:"call"`
 	OutcomeStatus dispatcher.OutcomeKind `json:"outcome_status"`
 	OutcomeSize   int                    `json:"outcome_size"`

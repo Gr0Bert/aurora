@@ -248,7 +248,7 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 		brainDigest:       brain.Digest,
 		parentRunID:       parentRunID,
 	}
-	run.journal, err = r.newJournal(run)
+	run.journal, err = r.newJournal(run, newRunHistory(), 0)
 	if err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err

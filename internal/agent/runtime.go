@@ -136,7 +136,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 				return run.journal, nil
 			}
 			return newLogJournal(runtime.log, runtime.scope(key.ThreadID), key.RunID, key.Revision,
-				runtime.journalNow, runtime.journalAppendPublisher(key.ThreadID)), nil
+				newRunHistory(), 0, runtime.journalNow, runtime.journalAppendPublisher(key.ThreadID)), nil
 		},
 		Tasks:      runtime.tasks,
 		TaskSecret: runtime.taskSecret,
@@ -373,7 +373,7 @@ func (r *Runtime) CreateRun(threadID string, message string, overrides []Capabil
 		revision:          1,
 		brainDigest:       brain.Digest,
 	}
-	run.journal, err = r.newJournal(run)
+	run.journal, err = r.newJournal(run, newRunHistory(), 0)
 	if err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err
@@ -421,24 +421,31 @@ func (r *Runtime) GetRun(runID string) (RunSnapshot, error) {
 func (r *Runtime) Journal(runID string) ([]JournalEntry, error) {
 	r.mu.Lock()
 	run := r.runs[runID]
-	var journal journaled.Journal
-	if run != nil {
-		journal = run.journal
-	}
 	r.mu.Unlock()
 	if run == nil {
 		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
 	}
-	length := journal.Length()
+	j, ok := run.journal.(*logJournal)
+	if !ok {
+		return nil, fmt.Errorf("%w: run %s has no readable journal", ErrNotFound, runID)
+	}
+	length := j.Length()
 	entries := make([]JournalEntry, 0, length)
 	for i := 0; i < length; i++ {
-		record, err := journal.Load(i)
+		record, err := j.Load(i)
 		if err != nil {
 			return nil, err
 		}
+		rev := j.rev
+		if i < j.forkOffset {
+			if r, ok2 := j.history.revAt(i, j.rev); ok2 {
+				rev = r
+			}
+		}
 		entries = append(entries, JournalEntry{
-			Index: i,
-			Call:  record.Call,
+			Index:    i,
+			Revision: rev,
+			Call:     record.Call,
 			Outcome: JournalOutcome{
 				Status:  record.Outcome.Kind(),
 				Result:  record.Outcome.Result(),
@@ -613,12 +620,11 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 			return RunSnapshot{}, fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
 		}
 		run.revision++
-		forked, forkErr := parentJournal.fork(run.revision, forkOffset)
-		if forkErr != nil {
-			r.mu.Unlock()
-			return RunSnapshot{}, forkErr
-		}
-		run.journal = forked
+		run.journal = newLogJournal(
+			parentJournal.log, parentJournal.scope, parentJournal.run, run.revision,
+			parentJournal.history, forkOffset,
+			parentJournal.now, parentJournal.onAppend,
+		)
 		run.preserveSession = false
 		// Reuse the existing child subtree in spawn order (deep cascade resume).
 		// Children whose spawn call is replayed from the shared prefix are skipped;

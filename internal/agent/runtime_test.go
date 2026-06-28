@@ -96,22 +96,27 @@ func (s *runtimeStore) seed(t StoredThread, runs ...StoredRun) {
 	}
 }
 
-// lastForkOffset returns the offset of the most recent run.forked event, or 0.
-func (s *runtimeStore) lastForkOffset() int {
+// minRev2Index returns the lowest journal position that has a revision-2 entry,
+// or -1 if none. This verifies that a hard retry shared a prefix with revision 1
+// (i.e. the fork index > 0) without relying on an explicit fork event.
+func (s *runtimeStore) minRev2Index(runID string) int {
 	streams, _ := s.log.Streams(context.Background(), "local")
-	offset := 0
+	min := -1
 	for _, scope := range streams {
 		events, _ := s.log.Read(context.Background(), scope, 0)
 		for _, ev := range events {
-			if ev.Kind == evForked {
-				var fd forkedData
-				if json.Unmarshal(ev.Data, &fd) == nil {
-					offset = fd.Offset
+			if ev.Kind != evCapability || ev.Run != runID || ev.Rev != 2 {
+				continue
+			}
+			var cd capabilityData
+			if json.Unmarshal(ev.Data, &cd) == nil {
+				if min < 0 || cd.Position < min {
+					min = cd.Position
 				}
 			}
 		}
 	}
-	return offset
+	return min
 }
 
 type runtimeSessions struct {
@@ -780,13 +785,8 @@ func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
 	if recovered.Answer != "recovered" {
 		t.Fatalf("answer = %q, want recovered", recovered.Answer)
 	}
-	off := store.lastForkOffset()
-	if off <= 0 {
-		t.Fatalf("fork offset = %d, want > 0 (hard retry should share the pre-failure prefix)", off)
-	}
-
-	// The thread graph exposes both revisions of the run, with revision 2 forked
-	// from revision 1 at the failure point.
+	// The thread graph exposes a flat entry list where each entry carries its
+	// revision. Revision 2 must start at some index > 0 (shared prefix proof).
 	graph, err := runtime.ThreadGraph(thread.ID)
 	if err != nil {
 		t.Fatalf("thread graph: %v", err)
@@ -795,17 +795,23 @@ func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
 		t.Fatalf("graph runs = %d, want 1", len(graph.Runs))
 	}
 	gr := graph.Runs[0]
-	if gr.CurrentRevision != 2 || len(gr.Revisions) != 2 {
-		t.Fatalf("revisions = %d, current = %d, want 2/2", len(gr.Revisions), gr.CurrentRevision)
+	if gr.CurrentRevision != 2 {
+		t.Fatalf("current revision = %d, want 2", gr.CurrentRevision)
 	}
-	if gr.Revisions[0].Forked {
-		t.Fatal("revision 1 must not be a fork")
+	forkIdx := store.minRev2Index(gr.RunID)
+	if forkIdx <= 0 {
+		t.Fatalf("fork index = %d, want > 0 (hard retry must share the pre-failure prefix)", forkIdx)
 	}
-	rev2 := gr.Revisions[1]
-	if !rev2.Forked || rev2.ForkParent != 1 || rev2.ForkOffset != off {
-		t.Fatalf("revision 2 fork meta = %+v, want forked from rev 1 at offset %d", rev2, off)
+	rev1Count, rev2Count := 0, 0
+	for _, e := range gr.Entries {
+		switch e.Revision {
+		case 1:
+			rev1Count++
+		case 2:
+			rev2Count++
+		}
 	}
-	if len(gr.Revisions[0].Entries) == 0 || len(rev2.Entries) == 0 {
-		t.Fatal("both revisions should expose journal entries")
+	if rev1Count == 0 || rev2Count == 0 {
+		t.Fatalf("expected entries from both revisions, got rev1=%d rev2=%d", rev1Count, rev2Count)
 	}
 }
