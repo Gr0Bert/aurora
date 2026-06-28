@@ -81,18 +81,10 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		if err != nil {
 			return err
 		}
-		brain, err := r.brains.Resolve(em.Brain)
-		if err != nil {
-			slog.Info("skipping run restore: brain not registered",
-				"run_id", sr.ID, "brain", em.Brain)
-			continue
-		}
-		if sr.BrainDigest != "" && sr.BrainDigest != brain.Digest {
-			slog.Info("skipping run with outdated brain digest",
-				"run_id", sr.ID, "brain", brain.ID,
-				"stored_digest", sr.BrainDigest, "current_digest", brain.Digest)
-			continue
-		}
+		// Runs are always restored regardless of brain registration state:
+		// brains are loaded after restore via SetBrains, so r.brains is empty
+		// here. If the brain is unavailable when execution is attempted, execute()
+		// will fail the run cleanly at that point (compute == nil check).
 		status := sr.Status
 		if status == RunQueued || status == RunRunning || status == RunStopping {
 			status = RunInterrupted
@@ -111,7 +103,7 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 			answer:            sr.Answer,
 			err:               sr.Error,
 			effectiveManifest: cloneManifest(em),
-			brainDigest:       brain.Digest,
+			brainDigest:       sr.BrainDigest,
 			parentRunID:       sr.ParentRunID,
 			childRunIDs:       append([]string(nil), sr.ChildRunIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
