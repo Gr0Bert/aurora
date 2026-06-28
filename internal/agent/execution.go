@@ -5,12 +5,12 @@ package agent
 // each state change to the durable log and live watchers.
 
 import (
-	"github.com/aurora-capcompute/capcompute"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"errors"
 	"fmt"
+	"github.com/aurora-capcompute/capcompute"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
@@ -47,9 +47,6 @@ func (r *Runtime) execute(runID string) {
 		}
 		r.finishLocked(run, RunInterrupted, "", err)
 		_ = r.appendRun(run)
-		if thread := r.threads[run.threadID]; thread != nil {
-			_ = r.appendThread(thread)
-		}
 		snapshot := r.runSnapshotLocked(run)
 		threadID := run.threadID
 		r.mu.Unlock()
@@ -198,12 +195,6 @@ func (r *Runtime) finish(runID string, status RunStatus, answer string, err erro
 	}
 	r.finishLocked(run, status, answer, err)
 	_ = r.appendRun(run)
-	if thread := r.threads[run.threadID]; thread != nil {
-		// Conversation history is no longer persisted separately; it is derived
-		// from the thread's completed runs (each run stores its message + answer)
-		// and rebuilt on recovery.
-		_ = r.appendThread(thread)
-	}
 	snapshot := r.runSnapshotLocked(run)
 	threadID := run.threadID
 	r.mu.Unlock()
@@ -265,16 +256,6 @@ func (r *Runtime) journalAppendPublisher(threadID string) func(string, int, uint
 			},
 		})
 	}
-}
-
-// appendThread records a thread's current state to its event stream.
-func (r *Runtime) appendThread(thread *threadState) error {
-	ev, err := threadStateEvent(r.now().UTC(), r.storedThreadLocked(thread))
-	if err != nil {
-		return err
-	}
-	_, err = r.log.Append(context.Background(), r.scope(thread.id), ev)
-	return err
 }
 
 // appendRun records a run's current state to its thread's event stream.

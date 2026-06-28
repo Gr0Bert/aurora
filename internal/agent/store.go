@@ -37,21 +37,24 @@ type StoredThread struct {
 // StoredRun is a run's durable state, carried by run.state events and folded
 // back into memory on restore.
 type StoredRun struct {
-	TenantID          string
-	ID                string
-	ThreadID          string
-	Revision          uint64
-	Message           string
-	Status            RunStatus
-	Attempt           int
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	StartedAt         *time.Time
-	CompletedAt       *time.Time
-	Answer            string
-	Error             string
-	Manifest          Manifest
-	BrainDigest       string
+	TenantID    string
+	ID          string
+	ThreadID    string
+	Revision    uint64
+	Message     string
+	Status      RunStatus
+	Attempt     int
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	StartedAt   *time.Time
+	CompletedAt *time.Time
+	Answer      string
+	Error       string
+	Manifest    Manifest
+	BrainDigest string
+	// Tags carries the owning thread's tags (e.g. "binding_ref", "telegram:chat_id")
+	// so thread metadata survives without a separate thread.state event.
+	Tags map[string]string
 	// ParentRunID links a delegated child run back to the run that spawned it;
 	// ChildRunIDs records, in spawn order, the child runs this run delegated to.
 	ParentRunID string

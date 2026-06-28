@@ -285,9 +285,6 @@ func (r *Runtime) CreateThread(tags map[string]string) (ThreadSnapshot, error) {
 	if r.closed {
 		return ThreadSnapshot{}, fmt.Errorf("%w: runtime is closed", ErrConflict)
 	}
-	if err := r.appendThread(thread); err != nil {
-		return ThreadSnapshot{}, err
-	}
 	r.threads[id] = thread
 	return r.threadSnapshotLocked(thread), nil
 }
@@ -377,13 +374,6 @@ func (r *Runtime) CreateRun(threadID string, message string, manifest Manifest) 
 	thread.activeRunID = runID
 	thread.updatedAt = now
 	if err := r.appendRun(run); err != nil {
-		delete(r.runs, runID)
-		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
-		thread.activeRunID = ""
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
-	if err := r.appendThread(thread); err != nil {
 		delete(r.runs, runID)
 		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
 		thread.activeRunID = ""
@@ -537,9 +527,6 @@ func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
 	}
 	snapshot := r.runSnapshotLocked(run)
 	_ = r.appendRun(run)
-	if thread := r.threads[run.threadID]; thread != nil {
-		_ = r.appendThread(thread)
-	}
 	r.mu.Unlock()
 	if closeSession != nil {
 		_ = closeSession.Close(context.Background())
@@ -628,10 +615,6 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	thread.activeRunID = run.id
 	thread.updatedAt = run.updatedAt
 	if err := r.appendRun(run); err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
-	if err := r.appendThread(thread); err != nil {
 		r.mu.Unlock()
 		return RunSnapshot{}, err
 	}

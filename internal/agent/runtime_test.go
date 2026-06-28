@@ -85,14 +85,13 @@ func (s *runtimeStore) Release(_ context.Context, tenant, kind, resource, holder
 	return nil
 }
 
-// seed appends thread.state/run.state events so the runtime folds them on restore.
-func (s *runtimeStore) seed(t StoredThread, runs ...StoredRun) {
+// seed appends run.state events so the runtime folds them on restore.
+// Thread state is derived from the runs; no separate thread event is needed.
+func (s *runtimeStore) seed(runs ...StoredRun) {
 	now := time.Now().UTC()
-	ev, _ := threadStateEvent(now, t)
-	_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: t.TenantID, ThreadID: t.ID}, ev)
 	for _, r := range runs {
-		rev, _ := runStateEvent(now, r)
-		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, ThreadID: r.ThreadID}, rev)
+		ev, _ := runStateEvent(now, r)
+		_, _ = s.log.Append(context.Background(), eventlog.Scope{TenantID: r.TenantID, ThreadID: r.ThreadID}, ev)
 	}
 }
 
@@ -317,9 +316,6 @@ func TestRuntimeRejectsPersistedBrainDigestMismatch(t *testing.T) {
 	store := newRuntimeStore()
 	now := time.Now().UTC()
 	store.seed(
-		StoredThread{
-			TenantID: "local", ID: "thread", CreatedAt: now, UpdatedAt: now,
-		},
 		StoredRun{
 			TenantID: "local", ID: "run", ThreadID: "thread", Revision: 1,
 			Status: RunCompleted, CreatedAt: now, UpdatedAt: now,

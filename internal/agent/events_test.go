@@ -22,19 +22,33 @@ func TestFoldReconstructsLatestRunAndThreadState(t *testing.T) {
 	scope := eventlog.Scope{TenantID: "t", ThreadID: "th1"}
 	now := time.Unix(0, 0).UTC()
 
-	th, _ := threadStateEvent(now, StoredThread{TenantID: "t", ID: "th1", Title: "first", ActiveRunID: "run1"})
-	r1, _ := runStateEvent(now, StoredRun{TenantID: "t", ID: "run1", ThreadID: "th1", Revision: 1, Status: RunRunning})
-	r2, _ := runStateEvent(now.Add(time.Second), StoredRun{TenantID: "t", ID: "run1", ThreadID: "th1", Revision: 1, Status: RunCompleted, Answer: "done"})
-	thDone, _ := threadStateEvent(now.Add(time.Second), StoredThread{TenantID: "t", ID: "th1", Title: "first", ActiveRunID: ""})
-	mustAppend(t, log, scope, th, r1, r2, thDone)
+	// Run goes running → completed; thread state is derived from runs.
+	r1, _ := runStateEvent(now, StoredRun{
+		TenantID: "t", ID: "run1", ThreadID: "th1", Revision: 1,
+		Message: "hello", Status: RunRunning,
+		CreatedAt: now, UpdatedAt: now,
+		Tags: map[string]string{"binding_ref": "ops"},
+	})
+	r2, _ := runStateEvent(now.Add(time.Second), StoredRun{
+		TenantID: "t", ID: "run1", ThreadID: "th1", Revision: 1,
+		Message: "hello", Status: RunCompleted, Answer: "done",
+		CreatedAt: now, UpdatedAt: now.Add(time.Second),
+		Tags: map[string]string{"binding_ref": "ops"},
+	})
+	mustAppend(t, log, scope, r1, r2)
 
 	events, _ := log.Read(context.Background(), scope, 0)
 	proj, err := Fold(events)
 	if err != nil {
 		t.Fatalf("fold: %v", err)
 	}
+	// Completed run is terminal: no active run on the thread.
 	if proj.Thread.ActiveRunID != "" {
-		t.Fatalf("thread active run = %q, want cleared (last writer wins)", proj.Thread.ActiveRunID)
+		t.Fatalf("thread active run = %q, want cleared (completed run is not active)", proj.Thread.ActiveRunID)
+	}
+	// Thread identity and tags are derived from the run.
+	if proj.Thread.ID != "th1" || proj.Thread.Tags["binding_ref"] != "ops" {
+		t.Fatalf("thread = %+v, want id=th1 binding_ref=ops", proj.Thread)
 	}
 	run := proj.Runs["run1"]
 	if run.Status != RunCompleted || run.Answer != "done" {

@@ -163,13 +163,19 @@ func delegationCapability(name string, child ChildManifest) dispatcher.Capabilit
 	desc.WriteString("Delegate work to the ")
 	desc.WriteString(name)
 	desc.WriteString(" brain.")
-	if len(child.Capabilities) > 0 {
+	visibleCaps := make([]string, 0, len(child.Capabilities))
+	for _, cap := range child.Capabilities {
+		if !cap.Hidden {
+			visibleCaps = append(visibleCaps, cap.Name)
+		}
+	}
+	if len(visibleCaps) > 0 {
 		desc.WriteString(" It can: ")
-		for i, cap := range child.Capabilities {
+		for i, name := range visibleCaps {
 			if i > 0 {
 				desc.WriteString(", ")
 			}
-			desc.WriteString(cap.Name)
+			desc.WriteString(name)
 		}
 		desc.WriteString(".")
 	} else {
@@ -270,13 +276,6 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 	thread.activeRunID = runID
 	thread.updatedAt = now
 	if err := r.appendRun(run); err != nil {
-		delete(r.runs, runID)
-		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
-		thread.activeRunID = ""
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
-	if err := r.appendThread(thread); err != nil {
 		delete(r.runs, runID)
 		thread.runIDs = thread.runIDs[:len(thread.runIDs)-1]
 		thread.activeRunID = ""

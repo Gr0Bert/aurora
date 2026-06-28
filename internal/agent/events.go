@@ -11,13 +11,12 @@ import (
 )
 
 // Domain event kinds appended to a thread's eventlog stream. Lifecycle payloads
-// are state-carried: a thread/run event holds the entity's full durable state at
-// that point, so folding is last-writer-wins per id and provably reproduces the
-// state the runtime previously upserted. Task events are semantic (created /
-// resolved / executed). Capability-journal and fork events are defined alongside
-// the journal view.
+// are state-carried: a run event holds the run's full durable state at that
+// point, so folding is last-writer-wins per id. Thread state is derived from
+// the run projection (no separate thread event). Task events are semantic
+// (created / resolved / executed). Capability-journal and fork events are
+// defined alongside the journal view.
 const (
-	evThreadState  = "thread.state"
 	evRunState     = "run.state"
 	evTaskCreated  = "task.created"
 	evTaskResolved = "task.resolved"
@@ -34,10 +33,6 @@ type taskEventData struct {
 
 type taskExecutedData struct {
 	TaskID string `json:"task_id"`
-}
-
-func threadStateEvent(now time.Time, t StoredThread) (eventlog.Event, error) {
-	return encodeEvent(evThreadState, "", 0, now, t)
 }
 
 func runStateEvent(now time.Time, r StoredRun) (eventlog.Event, error) {
@@ -76,7 +71,8 @@ type Projection struct {
 }
 
 // Fold reconstructs a thread's durable projection from its event stream. Events
-// must be in append order (ascending Seq).
+// must be in append order (ascending Seq). Thread state is derived from the run
+// projection rather than stored in a dedicated event.
 func Fold(events []eventlog.Event) (Projection, error) {
 	proj := Projection{
 		Runs:  make(map[string]StoredRun),
@@ -84,12 +80,6 @@ func Fold(events []eventlog.Event) (Projection, error) {
 	}
 	for _, ev := range events {
 		switch ev.Kind {
-		case evThreadState:
-			var t StoredThread
-			if err := json.Unmarshal(ev.Data, &t); err != nil {
-				return Projection{}, fmt.Errorf("decode thread.state: %w", err)
-			}
-			proj.Thread = t
 		case evRunState:
 			var r StoredRun
 			if err := json.Unmarshal(ev.Data, &r); err != nil {
@@ -113,9 +103,48 @@ func Fold(events []eventlog.Event) (Projection, error) {
 				proj.Tasks[x.TaskID] = rec
 			}
 		}
-		// capability.recorded / run.forked are folded by the journal view, not here.
+		// capability.recorded / run.forked / thread.state (legacy, ignored) are
+		// handled by the journal view or silently skipped here.
 	}
+	proj.Thread = deriveStoredThread(proj.Runs)
 	return proj, nil
+}
+
+// deriveStoredThread reconstructs thread metadata from the run projection.
+// Thread state is not stored in a separate event; instead it is derived:
+// - identity (ID, TenantID) and Tags come from the earliest run
+// - Title is the first run's message truncated to 60 runes
+// - CreatedAt is the earliest run's CreatedAt
+// - UpdatedAt is the latest run's UpdatedAt
+// - ActiveRunID is the ID of the one run (if any) that is not in a terminal state
+func deriveStoredThread(runs map[string]StoredRun) StoredThread {
+	if len(runs) == 0 {
+		return StoredThread{}
+	}
+	var first StoredRun
+	for _, r := range runs {
+		if first.ID == "" || r.CreatedAt.Before(first.CreatedAt) {
+			first = r
+		}
+	}
+	th := StoredThread{
+		TenantID:  first.TenantID,
+		ID:        first.ThreadID,
+		Title:     threadTitle(first.Message),
+		CreatedAt: first.CreatedAt,
+		UpdatedAt: first.UpdatedAt,
+		Tags:      cloneTags(first.Tags),
+	}
+	for _, r := range runs {
+		if r.UpdatedAt.After(th.UpdatedAt) {
+			th.UpdatedAt = r.UpdatedAt
+		}
+		switch r.Status {
+		case RunQueued, RunRunning, RunStopping, RunYielded, RunWaitingTask, RunInterrupted:
+			th.ActiveRunID = r.ID
+		}
+	}
+	return th
 }
 
 // TaskList returns the projection's task records sorted by creation time, the

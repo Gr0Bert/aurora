@@ -5,9 +5,9 @@ package agent
 // helpers (titles, visible capabilities, defensive copies) they lean on.
 
 import (
-	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"crypto/rand"
 	"encoding/hex"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"strings"
 	"time"
 
@@ -61,21 +61,21 @@ func (r *Runtime) runSnapshotLocked(run *runState) RunSnapshot {
 		journalLength = run.journal.Length()
 	}
 	return RunSnapshot{
-		ID:                run.id,
-		ThreadID:          run.threadID,
-		Message:           run.message,
-		Status:            run.status,
-		Attempt:           run.attempt,
-		Revision:          run.revision,
-		Answer:            run.answer,
-		Error:             run.err,
-		JournalLength:     journalLength,
-		CreatedAt:         run.createdAt,
-		UpdatedAt:         run.updatedAt,
-		StartedAt:         copyTime(run.startedAt),
-		CompletedAt:       copyTime(run.completedAt),
-		Manifest:          cloneManifest(run.manifest),
-		BrainDigest:       run.brainDigest,
+		ID:            run.id,
+		ThreadID:      run.threadID,
+		Message:       run.message,
+		Status:        run.status,
+		Attempt:       run.attempt,
+		Revision:      run.revision,
+		Answer:        run.answer,
+		Error:         run.err,
+		JournalLength: journalLength,
+		CreatedAt:     run.createdAt,
+		UpdatedAt:     run.updatedAt,
+		StartedAt:     copyTime(run.startedAt),
+		CompletedAt:   copyTime(run.completedAt),
+		Manifest:      cloneManifest(run.manifest),
+		BrainDigest:   run.brainDigest,
 	}
 }
 
@@ -144,19 +144,11 @@ func (r *Runtime) runContextLocked(run *runState) RunContext {
 	}
 }
 
-func (r *Runtime) storedThreadLocked(thread *threadState) StoredThread {
-	return StoredThread{
-		TenantID:    r.tenantID,
-		ID:          thread.id,
-		Title:       thread.title,
-		CreatedAt:   thread.createdAt,
-		UpdatedAt:   thread.updatedAt,
-		ActiveRunID: thread.activeRunID,
-		Tags:        cloneTags(thread.tags),
-	}
-}
-
 func (r *Runtime) storedRunLocked(run *runState) StoredRun {
+	var tags map[string]string
+	if thread := r.threads[run.threadID]; thread != nil {
+		tags = cloneTags(thread.tags)
+	}
 	return StoredRun{
 		TenantID:          r.tenantID,
 		ID:                run.id,
@@ -173,6 +165,7 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		Error:             run.err,
 		Manifest:          cloneManifest(run.manifest),
 		BrainDigest:       run.brainDigest,
+		Tags:              tags,
 		ParentRunID:       run.parentRunID,
 		ChildRunIDs:       append([]string(nil), run.childRunIDs...),
 		ChildSpawnOffsets: append([]int(nil), run.childSpawnOffsets...),
