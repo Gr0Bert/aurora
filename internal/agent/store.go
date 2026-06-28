@@ -29,6 +29,10 @@ type StoredThread struct {
 	UpdatedAt   time.Time
 	Manifest    Manifest
 	ActiveRunID string
+	// Tags are arbitrary key-value labels set at creation time (e.g.
+	// "telegram:chat_id" → "12345"). Channel bridges use them to find their
+	// threads from the log without maintaining a separate mapping store.
+	Tags map[string]string
 }
 
 // StoredRun is a run's durable state, carried by run.state events and folded

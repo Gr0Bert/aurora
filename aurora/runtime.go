@@ -3,7 +3,7 @@ package aurora
 import "context"
 
 type Runtime interface {
-	CreateThread(manifest Manifest) (ThreadSnapshot, error)
+	CreateThread(manifest Manifest, tags map[string]string) (ThreadSnapshot, error)
 	ListThreads() []ThreadSummary
 	Brains() []BrainArtifact
 	SetBrains(ctx context.Context, brains []BrainSource) error

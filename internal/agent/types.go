@@ -99,6 +99,7 @@ type threadState struct {
 	runIDs      []string
 	activeRunID string
 	manifest    Manifest
+	tags        map[string]string
 }
 
 type runState struct {
@@ -158,13 +159,14 @@ type agentOutput struct {
 }
 
 type ThreadSummary struct {
-	ID          string    `json:"id"`
-	Title       string    `json:"title"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
-	RunCount    int       `json:"run_count"`
-	ActiveRunID string    `json:"active_run_id,omitempty"`
-	Manifest    Manifest  `json:"manifest"`
+	ID          string            `json:"id"`
+	Title       string            `json:"title"`
+	CreatedAt   time.Time         `json:"created_at"`
+	UpdatedAt   time.Time         `json:"updated_at"`
+	RunCount    int               `json:"run_count"`
+	ActiveRunID string            `json:"active_run_id,omitempty"`
+	Manifest    Manifest          `json:"manifest"`
+	Tags        map[string]string `json:"tags,omitempty"`
 }
 
 type ThreadSnapshot struct {

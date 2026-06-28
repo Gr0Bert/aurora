@@ -62,6 +62,7 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		updatedAt:   stored.UpdatedAt,
 		activeRunID: stored.ActiveRunID,
 		manifest:    cloneManifest(manifest),
+		tags:        cloneTags(stored.Tags),
 	}
 	r.threads[thread.id] = thread
 

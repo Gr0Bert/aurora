@@ -25,6 +25,7 @@ func (r *Runtime) threadSummaryLocked(thread *threadState) ThreadSummary {
 		RunCount:    len(thread.runIDs),
 		ActiveRunID: thread.activeRunID,
 		Manifest:    cloneManifest(thread.manifest),
+		Tags:        cloneTags(thread.tags),
 	}
 }
 
@@ -153,6 +154,7 @@ func (r *Runtime) storedThreadLocked(thread *threadState) StoredThread {
 		UpdatedAt:   thread.updatedAt,
 		Manifest:    cloneManifest(thread.manifest),
 		ActiveRunID: thread.activeRunID,
+		Tags:        cloneTags(thread.tags),
 	}
 }
 
@@ -186,4 +188,15 @@ func randomID(prefix string) (string, error) {
 		return "", err
 	}
 	return prefix + hex.EncodeToString(raw[:]), nil
+}
+
+func cloneTags(tags map[string]string) map[string]string {
+	if len(tags) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(tags))
+	for k, v := range tags {
+		out[k] = v
+	}
+	return out
 }

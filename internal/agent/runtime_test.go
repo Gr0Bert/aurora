@@ -203,7 +203,7 @@ func TestRuntimePassesEffectiveManifestToDispatcherProvider(t *testing.T) {
 		Capabilities: []CapabilityConfig{{
 			Name: "custom.call", Settings: json.RawMessage(`{"value":1}`),
 		}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 	if len(runtime.Brains()) != 0 {
 		t.Fatalf("expected no brains at boot, got %v", runtime.Brains())
 	}
-	if _, err := runtime.CreateThread(Manifest{Version: ManifestVersion}); err == nil {
+	if _, err := runtime.CreateThread(Manifest{Version: ManifestVersion}, nil); err == nil {
 		t.Fatal("creating a thread with no registered brain should fail")
 	}
 
@@ -282,7 +282,7 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 	thread, err := runtime.CreateThread(Manifest{
 		Version:      ManifestVersion,
 		Capabilities: []CapabilityConfig{{Name: "custom.call", Settings: json.RawMessage(`{"value":1}`)}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -514,7 +514,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		Version:  ManifestVersion,
 		Brain:    "brain@1",
 		Children: []ChildManifest{{Name: "child", Brain: "brain@1", Capabilities: []CapabilityConfig{}}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -641,7 +641,7 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 			Name: "child", Brain: "brain@1", Capabilities: []CapabilityConfig{},
 			OnFailure: OnFailurePropagate,
 		}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
@@ -758,7 +758,7 @@ func TestRuntimeHardRetryForksFromFailurePoint(t *testing.T) {
 		Version:      ManifestVersion,
 		Brain:        "brain@1",
 		Capabilities: []CapabilityConfig{{Name: "tool.x"}},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
