@@ -27,7 +27,6 @@ type StoredThread struct {
 	Title       string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
-	Manifest    Manifest
 	ActiveRunID string
 	// Tags are arbitrary key-value labels set at creation time (e.g.
 	// "telegram:chat_id" → "12345"). Channel bridges use them to find their
@@ -51,7 +50,7 @@ type StoredRun struct {
 	CompletedAt       *time.Time
 	Answer            string
 	Error             string
-	EffectiveManifest Manifest
+	Manifest          Manifest
 	BrainDigest       string
 	// ParentRunID links a delegated child run back to the run that spawned it;
 	// ChildRunIDs records, in spawn order, the child runs this run delegated to.

@@ -24,7 +24,6 @@ func (r *Runtime) threadSummaryLocked(thread *threadState) ThreadSummary {
 		UpdatedAt:   thread.updatedAt,
 		RunCount:    len(thread.runIDs),
 		ActiveRunID: thread.activeRunID,
-		Manifest:    cloneManifest(thread.manifest),
 		Tags:        cloneTags(thread.tags),
 	}
 }
@@ -75,7 +74,7 @@ func (r *Runtime) runSnapshotLocked(run *runState) RunSnapshot {
 		UpdatedAt:         run.updatedAt,
 		StartedAt:         copyTime(run.startedAt),
 		CompletedAt:       copyTime(run.completedAt),
-		EffectiveManifest: cloneManifest(run.effectiveManifest),
+		Manifest:          cloneManifest(run.manifest),
 		BrainDigest:       run.brainDigest,
 	}
 }
@@ -152,7 +151,6 @@ func (r *Runtime) storedThreadLocked(thread *threadState) StoredThread {
 		Title:       thread.title,
 		CreatedAt:   thread.createdAt,
 		UpdatedAt:   thread.updatedAt,
-		Manifest:    cloneManifest(thread.manifest),
 		ActiveRunID: thread.activeRunID,
 		Tags:        cloneTags(thread.tags),
 	}
@@ -173,7 +171,7 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		CompletedAt:       copyTime(run.completedAt),
 		Answer:            run.answer,
 		Error:             run.err,
-		EffectiveManifest: cloneManifest(run.effectiveManifest),
+		Manifest:          cloneManifest(run.manifest),
 		BrainDigest:       run.brainDigest,
 		ParentRunID:       run.parentRunID,
 		ChildRunIDs:       append([]string(nil), run.childRunIDs...),

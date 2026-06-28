@@ -89,32 +89,6 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 	return cloneManifest(manifest), nil
 }
 
-func EffectiveManifest(base Manifest, overrides []CapabilityConfig, provider DispatcherProvider) (Manifest, error) {
-	effective := cloneManifest(base)
-	index := make(map[string]int, len(effective.Capabilities))
-	for i, capability := range effective.Capabilities {
-		index[capability.Name] = i
-	}
-	for _, override := range overrides {
-		overrideManifest, err := ValidateManifest(Manifest{
-			Version:      ManifestVersion,
-			SystemPrompt: effective.SystemPrompt,
-			Brain:        effective.Brain,
-			Capabilities: []CapabilityConfig{override},
-		}, provider)
-		if err != nil {
-			return Manifest{}, err
-		}
-		validated := overrideManifest.Capabilities[0]
-		if i, exists := index[validated.Name]; exists {
-			effective.Capabilities[i] = validated
-		} else {
-			index[validated.Name] = len(effective.Capabilities)
-			effective.Capabilities = append(effective.Capabilities, validated)
-		}
-	}
-	return effective, nil
-}
 
 func validateChildren(children []ChildManifest, provider DispatcherProvider) error {
 	seen := make(map[string]struct{}, len(children))

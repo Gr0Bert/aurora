@@ -83,7 +83,7 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	// this position (in spawn order) and retry it, which recursively cascades the
 	// restart down its own subtree.
 	if childID, threadID, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
-		if _, err := c.runtime.Retry(childID, RetryRestart, nil); err != nil {
+		if _, err := c.runtime.Retry(childID, RetryRestart); err != nil {
 			return dispatcher.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
 		answer, err := c.runtime.waitForCompletion(ctx, childID, threadID)
@@ -99,11 +99,11 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
 	slog.Info("spawning fresh child thread", "parent_run", parent.RunID, "child", c.manifest.Name)
-	thread, err := c.runtime.CreateThread(childManifest, nil)
+	thread, err := c.runtime.CreateThread(nil)
 	if err != nil {
 		return dispatcher.Fail(fmt.Sprintf("create child thread: %v", err)), nil
 	}
-	run, err := c.runtime.createChildRun(parent.RunID, thread.ID, args.Message)
+	run, err := c.runtime.createChildRun(parent.RunID, thread.ID, args.Message, childManifest)
 	if err != nil {
 		return dispatcher.Fail(fmt.Sprintf("create child run: %v", err)), nil
 	}
@@ -215,9 +215,13 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 	return childID, child.threadID, true
 }
 
-func (r *Runtime) createChildRun(parentRunID string, threadID string, message string) (RunSnapshot, error) {
+func (r *Runtime) createChildRun(parentRunID string, threadID string, message string, manifest Manifest) (RunSnapshot, error) {
 	if message == "" {
 		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
+	}
+	brain, err := r.brains.Resolve(manifest.Brain)
+	if err != nil {
+		return RunSnapshot{}, err
 	}
 	runID, err := r.idSource("run_")
 	if err != nil {
@@ -239,29 +243,19 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
 	}
-	effectiveManifest, err := EffectiveManifest(thread.manifest, nil, r.dispatchers)
-	if err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
-	brain, err := r.brains.Resolve(effectiveManifest.Brain)
-	if err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
 	run := &runState{
-		id:                runID,
-		threadID:          threadID,
-		message:           message,
-		history:           append([]HistoryMessage(nil), thread.history...),
-		status:            RunQueued,
-		attempt:           1,
-		createdAt:         now,
-		updatedAt:         now,
-		effectiveManifest: effectiveManifest,
-		revision:          1,
-		brainDigest:       brain.Digest,
-		parentRunID:       parentRunID,
+		id:          runID,
+		threadID:    threadID,
+		message:     message,
+		history:     append([]HistoryMessage(nil), thread.history...),
+		status:      RunQueued,
+		attempt:     1,
+		createdAt:   now,
+		updatedAt:   now,
+		manifest:    manifest,
+		revision:    1,
+		brainDigest: brain.Digest,
+		parentRunID: parentRunID,
 	}
 	run.journal, err = r.newJournal(run, newRunHistory(), 0)
 	if err != nil {

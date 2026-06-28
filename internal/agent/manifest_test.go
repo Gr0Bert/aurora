@@ -51,28 +51,6 @@ func TestValidateManifestUsesInjectedProvider(t *testing.T) {
 	}
 }
 
-func TestEffectiveManifestNormalizesReplacementsAndAdditions(t *testing.T) {
-	provider := &testDispatchers{}
-	effective, err := EffectiveManifest(
-		Manifest{Version: ManifestVersion, Brain: "brain@1", Capabilities: []CapabilityConfig{
-			{Name: "one", Settings: json.RawMessage(`{"value":1}`)},
-		}},
-		[]CapabilityConfig{
-			{Name: "one", Settings: json.RawMessage(`{"value":2}`)},
-			{Name: "two"},
-		},
-		provider,
-	)
-	if err != nil {
-		t.Fatalf("effective manifest: %v", err)
-	}
-	if len(effective.Capabilities) != 2 ||
-		string(effective.Capabilities[0].Settings) != `{"value":2}` ||
-		string(effective.Capabilities[1].Settings) != `{}` {
-		t.Fatalf("effective capabilities = %+v", effective.Capabilities)
-	}
-}
-
 func TestValidateManifestRejectsMissingProviderAndUnknownCapability(t *testing.T) {
 	if _, err := ValidateManifest(Manifest{Version: ManifestVersion}, nil); err == nil {
 		t.Fatal("expected missing provider error")

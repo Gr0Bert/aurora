@@ -107,7 +107,7 @@ func NewRuntime(ctx context.Context, config Config) (*Runtime, error) {
 			var message string
 			var history []HistoryMessage
 			if run != nil {
-				manifest = cloneManifest(run.effectiveManifest)
+				manifest = cloneManifest(run.manifest)
 				message = run.message
 				history = append([]HistoryMessage(nil), run.history...)
 			}
@@ -272,23 +272,13 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 	return nil
 }
 
-func (r *Runtime) CreateThread(manifest Manifest, tags map[string]string) (ThreadSnapshot, error) {
-	if strings.TrimSpace(manifest.Brain) == "" {
-		manifest.Brain = r.brains.DefaultID()
-	}
-	manifest, err := ValidateManifest(manifest, r.dispatchers)
-	if err != nil {
-		return ThreadSnapshot{}, err
-	}
-	if _, err := r.brains.Resolve(manifest.Brain); err != nil {
-		return ThreadSnapshot{}, err
-	}
+func (r *Runtime) CreateThread(tags map[string]string) (ThreadSnapshot, error) {
 	id, err := r.idSource("thr_")
 	if err != nil {
 		return ThreadSnapshot{}, err
 	}
 	now := r.now().UTC()
-	thread := &threadState{id: id, title: "New thread", createdAt: now, updatedAt: now, manifest: manifest, tags: cloneTags(tags)}
+	thread := &threadState{id: id, title: "New thread", createdAt: now, updatedAt: now, tags: cloneTags(tags)}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -326,9 +316,20 @@ func (r *Runtime) GetThread(threadID string) (ThreadSnapshot, error) {
 	return r.threadSnapshotLocked(thread), nil
 }
 
-func (r *Runtime) CreateRun(threadID string, message string, overrides []CapabilityConfig) (RunSnapshot, error) {
+func (r *Runtime) CreateRun(threadID string, message string, manifest Manifest) (RunSnapshot, error) {
 	if message == "" {
 		return RunSnapshot{}, fmt.Errorf("%w: message is required", ErrInvalid)
+	}
+	if strings.TrimSpace(manifest.Brain) == "" {
+		manifest.Brain = r.brains.DefaultID()
+	}
+	manifest, err := ValidateManifest(manifest, r.dispatchers)
+	if err != nil {
+		return RunSnapshot{}, err
+	}
+	brain, err := r.brains.Resolve(manifest.Brain)
+	if err != nil {
+		return RunSnapshot{}, err
 	}
 	runID, err := r.idSource("run_")
 	if err != nil {
@@ -350,28 +351,18 @@ func (r *Runtime) CreateRun(threadID string, message string, overrides []Capabil
 		r.mu.Unlock()
 		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
 	}
-	effectiveManifest, err := EffectiveManifest(thread.manifest, overrides, r.dispatchers)
-	if err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
-	brain, err := r.brains.Resolve(effectiveManifest.Brain)
-	if err != nil {
-		r.mu.Unlock()
-		return RunSnapshot{}, err
-	}
 	run := &runState{
-		id:                runID,
-		threadID:          threadID,
-		message:           message,
-		history:           append([]HistoryMessage(nil), thread.history...),
-		status:            RunQueued,
-		attempt:           1,
-		createdAt:         now,
-		updatedAt:         now,
-		effectiveManifest: effectiveManifest,
-		revision:          1,
-		brainDigest:       brain.Digest,
+		id:          runID,
+		threadID:    threadID,
+		message:     message,
+		history:     append([]HistoryMessage(nil), thread.history...),
+		status:      RunQueued,
+		attempt:     1,
+		createdAt:   now,
+		updatedAt:   now,
+		manifest:    manifest,
+		revision:    1,
+		brainDigest: brain.Digest,
 	}
 	run.journal, err = r.newJournal(run, newRunHistory(), 0)
 	if err != nil {
@@ -509,7 +500,7 @@ func (r *Runtime) ResolveTask(taskID, token string, resolution task.Resolution) 
 	shouldResume := run != nil && run.status == RunWaitingTask
 	r.mu.Unlock()
 	if shouldResume {
-		if _, retryErr := r.Retry(record.Scope.RunID, RetryResume, nil); retryErr != nil {
+		if _, retryErr := r.Retry(record.Scope.RunID, RetryResume); retryErr != nil {
 			return TaskSnapshot{}, retryErr
 		}
 	}
@@ -557,7 +548,7 @@ func (r *Runtime) Stop(runID string) (RunSnapshot, error) {
 	return snapshot, nil
 }
 
-func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConfig) (RunSnapshot, error) {
+func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	if mode != RetryResume && mode != RetryRestart {
 		return RunSnapshot{}, fmt.Errorf("%w: retry mode must be resume or restart", ErrInvalid)
 	}
@@ -592,19 +583,6 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 		return RunSnapshot{}, fmt.Errorf("%w: thread already has active run %s", ErrConflict, thread.activeRunID)
 	}
 
-	if mode != RetryRestart && len(overrides) > 0 {
-		r.mu.Unlock()
-		return RunSnapshot{}, fmt.Errorf("%w: capability overrides require restart mode", ErrInvalid)
-	}
-	var replacementManifest *Manifest
-	if len(overrides) > 0 {
-		effective, err := EffectiveManifest(thread.manifest, overrides, r.dispatchers)
-		if err != nil {
-			r.mu.Unlock()
-			return RunSnapshot{}, err
-		}
-		replacementManifest = &effective
-	}
 	if mode == RetryRestart {
 		// Hard restart: always fork from the beginning (the agent.input step),
 		// giving the brain a completely fresh revision with no shared prefix.
@@ -636,9 +614,6 @@ func (r *Runtime) Retry(runID string, mode RetryMode, overrides []CapabilityConf
 				return RunSnapshot{}, err
 			}
 		}
-	}
-	if replacementManifest != nil {
-		run.effectiveManifest = *replacementManifest
 	}
 	run.status = RunQueued
 	run.attempt++

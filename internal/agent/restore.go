@@ -45,24 +45,12 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 	if stored.ID == "" {
 		return nil
 	}
-	if stored.Manifest.Brain == "" {
-		stored.Manifest.Brain = r.brains.DefaultID()
-	}
-	manifest, err := ValidateManifest(stored.Manifest, r.dispatchers)
-	if err != nil {
-		return err
-	}
-	// Do not gate thread restore on brain availability: threads are always
-	// visible regardless of whether the brain has been registered yet (brains
-	// are loaded after restore via SetBrains). Runs that reference an
-	// unregistered or digest-mismatched brain are skipped below.
 	thread := &threadState{
 		id:          stored.ID,
 		title:       stored.Title,
 		createdAt:   stored.CreatedAt,
 		updatedAt:   stored.UpdatedAt,
 		activeRunID: stored.ActiveRunID,
-		manifest:    cloneManifest(manifest),
 		tags:        cloneTags(stored.Tags),
 	}
 	r.threads[thread.id] = thread
@@ -74,10 +62,10 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 	sort.Slice(runs, func(i, j int) bool { return runs[i].CreatedAt.Before(runs[j].CreatedAt) })
 
 	for _, sr := range runs {
-		if sr.EffectiveManifest.Brain == "" {
-			sr.EffectiveManifest.Brain = r.brains.DefaultID()
+		if sr.Manifest.Brain == "" {
+			sr.Manifest.Brain = r.brains.DefaultID()
 		}
-		em, err := ValidateManifest(sr.EffectiveManifest, r.dispatchers)
+		em, err := ValidateManifest(sr.Manifest, r.dispatchers)
 		if err != nil {
 			return err
 		}
@@ -102,7 +90,7 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 			completedAt:       copyTime(sr.CompletedAt),
 			answer:            sr.Answer,
 			err:               sr.Error,
-			effectiveManifest: cloneManifest(em),
+			manifest:          cloneManifest(em),
 			brainDigest:       sr.BrainDigest,
 			parentRunID:       sr.ParentRunID,
 			childRunIDs:       append([]string(nil), sr.ChildRunIDs...),

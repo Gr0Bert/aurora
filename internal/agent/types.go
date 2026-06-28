@@ -98,7 +98,6 @@ type threadState struct {
 	history     []HistoryMessage
 	runIDs      []string
 	activeRunID string
-	manifest    Manifest
 	tags        map[string]string
 }
 
@@ -120,7 +119,7 @@ type runState struct {
 	handle            *capcompute.PlayHandle[RunKey]
 	stopRequested     bool
 	preserveSession   bool
-	effectiveManifest Manifest
+	manifest          Manifest
 	revision          uint64
 	brainDigest       string
 	// parentRunID and childRunIDs make delegated runs addressable: a child knows
@@ -165,7 +164,6 @@ type ThreadSummary struct {
 	UpdatedAt   time.Time         `json:"updated_at"`
 	RunCount    int               `json:"run_count"`
 	ActiveRunID string            `json:"active_run_id,omitempty"`
-	Manifest    Manifest          `json:"manifest"`
 	Tags        map[string]string `json:"tags,omitempty"`
 }
 
@@ -189,7 +187,7 @@ type RunSnapshot struct {
 	UpdatedAt         time.Time  `json:"updated_at"`
 	StartedAt         *time.Time `json:"started_at,omitempty"`
 	CompletedAt       *time.Time `json:"completed_at,omitempty"`
-	EffectiveManifest Manifest   `json:"effective_manifest"`
+	Manifest          Manifest   `json:"manifest"`
 	BrainDigest       string     `json:"brain_digest"`
 }
 

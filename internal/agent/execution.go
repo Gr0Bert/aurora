@@ -61,11 +61,11 @@ func (r *Runtime) execute(runID string) {
 	)
 	session := run.session
 	preserve := run.preserveSession && session != nil
-	compute := r.computes[run.effectiveManifest.Brain]
+	compute := r.computes[run.manifest.Brain]
 	run.preserveSession = false
 	r.mu.Unlock()
 	if compute == nil {
-		r.finish(runID, RunFailed, "", fmt.Errorf("brain %q is unavailable", run.effectiveManifest.Brain))
+		r.finish(runID, RunFailed, "", fmt.Errorf("brain %q is unavailable", run.manifest.Brain))
 		return
 	}
 

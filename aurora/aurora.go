@@ -23,7 +23,3 @@ func NewRuntime(ctx context.Context, config Config) (Runtime, error) {
 func ValidateManifest(m Manifest, provider DispatcherProvider) (Manifest, error) {
 	return agent.ValidateManifest(m, provider)
 }
-
-func EffectiveManifest(base Manifest, overrides []CapabilityConfig, provider DispatcherProvider) (Manifest, error) {
-	return agent.EffectiveManifest(base, overrides, provider)
-}

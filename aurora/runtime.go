@@ -3,12 +3,12 @@ package aurora
 import "context"
 
 type Runtime interface {
-	CreateThread(manifest Manifest, tags map[string]string) (ThreadSnapshot, error)
+	CreateThread(tags map[string]string) (ThreadSnapshot, error)
 	ListThreads() []ThreadSummary
 	Brains() []BrainArtifact
 	SetBrains(ctx context.Context, brains []BrainSource) error
 	GetThread(threadID string) (ThreadSnapshot, error)
-	CreateRun(threadID string, message string, overrides []CapabilityConfig) (RunSnapshot, error)
+	CreateRun(threadID string, message string, manifest Manifest) (RunSnapshot, error)
 	GetRun(runID string) (RunSnapshot, error)
 	Journal(runID string) ([]JournalEntry, error)
 	CallGraph(runID string) (RunGraphNode, error)
@@ -16,7 +16,7 @@ type Runtime interface {
 	Tasks(runID string) ([]TaskSnapshot, error)
 	ResolveTask(taskID string, token string, resolution Resolution) (TaskSnapshot, error)
 	Stop(runID string) (RunSnapshot, error)
-	Retry(runID string, mode RetryMode, overrides []CapabilityConfig) (RunSnapshot, error)
+	Retry(runID string, mode RetryMode) (RunSnapshot, error)
 	Subscribe(threadID string) (Event, <-chan Event, func(), error)
 	Close(ctx context.Context) error
 }

@@ -174,7 +174,7 @@ func TestNewRuntimeRequiresImplementationDependencies(t *testing.T) {
 	}
 }
 
-func TestRuntimePassesEffectiveManifestToDispatcherProvider(t *testing.T) {
+func TestRuntimePassesManifestToDispatcherProvider(t *testing.T) {
 	if _, err := exec.LookPath("tinygo"); err != nil {
 		t.Skip("tinygo not found")
 	}
@@ -202,18 +202,16 @@ func TestRuntimePassesEffectiveManifestToDispatcherProvider(t *testing.T) {
 			t.Errorf("close runtime: %v", err)
 		}
 	})
-	thread, err := runtime.CreateThread(Manifest{
-		Version: ManifestVersion,
-		Capabilities: []CapabilityConfig{{
-			Name: "custom.call", Settings: json.RawMessage(`{"value":1}`),
-		}},
-	}, nil)
+	thread, err := runtime.CreateThread(nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "finish", []CapabilityConfig{{
-		Name: "custom.call", Settings: json.RawMessage(`{"value":2}`),
-	}})
+	run, err := runtime.CreateRun(thread.ID, "finish", Manifest{
+		Version: ManifestVersion,
+		Capabilities: []CapabilityConfig{{
+			Name: "custom.call", Settings: json.RawMessage(`{"value":2}`),
+		}},
+	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -270,8 +268,12 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 	if len(runtime.Brains()) != 0 {
 		t.Fatalf("expected no brains at boot, got %v", runtime.Brains())
 	}
-	if _, err := runtime.CreateThread(Manifest{Version: ManifestVersion}, nil); err == nil {
-		t.Fatal("creating a thread with no registered brain should fail")
+	emptyTh, err := runtime.CreateThread(nil)
+	if err != nil {
+		t.Fatalf("create thread (no brains): %v", err)
+	}
+	if _, err := runtime.CreateRun(emptyTh.ID, "task", Manifest{Version: ManifestVersion}); err == nil {
+		t.Fatal("creating a run with no registered brain should fail")
 	}
 
 	// Hot-register the brain.
@@ -283,14 +285,14 @@ func TestRuntimeSetBrainsLifecycle(t *testing.T) {
 	}
 
 	// A run now dispatches through the freshly registered brain.
-	thread, err := runtime.CreateThread(Manifest{
-		Version:      ManifestVersion,
-		Capabilities: []CapabilityConfig{{Name: "custom.call", Settings: json.RawMessage(`{"value":1}`)}},
-	}, nil)
+	thread, err := runtime.CreateThread(nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "finish", nil)
+	run, err := runtime.CreateRun(thread.ID, "finish", Manifest{
+		Version:      ManifestVersion,
+		Capabilities: []CapabilityConfig{{Name: "custom.call", Settings: json.RawMessage(`{"value":1}`)}},
+	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -317,13 +319,12 @@ func TestRuntimeRejectsPersistedBrainDigestMismatch(t *testing.T) {
 	store.seed(
 		StoredThread{
 			TenantID: "local", ID: "thread", CreatedAt: now, UpdatedAt: now,
-			Manifest: Manifest{Version: ManifestVersion, Brain: "brain@1"},
 		},
 		StoredRun{
 			TenantID: "local", ID: "run", ThreadID: "thread", Revision: 1,
 			Status: RunCompleted, CreatedAt: now, UpdatedAt: now,
-			EffectiveManifest: Manifest{Version: ManifestVersion, Brain: "brain@1"},
-			BrainDigest:       "different",
+			Manifest:    Manifest{Version: ManifestVersion, Brain: "brain@1"},
+			BrainDigest: "different",
 		},
 	)
 	_, err := NewRuntime(context.Background(), Config{
@@ -514,15 +515,15 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(Manifest{
-		Version:  ManifestVersion,
-		Brain:    "brain@1",
-		Children: []ChildManifest{{Name: "child", Brain: "brain@1", Capabilities: []CapabilityConfig{}}},
-	}, nil)
+	thread, err := runtime.CreateThread(nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "parent task", nil)
+	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
+		Version:  ManifestVersion,
+		Brain:    "brain@1",
+		Children: []ChildManifest{{Name: "child", Brain: "brain@1", Capabilities: []CapabilityConfig{}}},
+	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -554,7 +555,7 @@ func TestRuntimeCascadeResumeReusesChildRun(t *testing.T) {
 
 	// Deep cascade resume: restarting the parent must reuse and retry the same
 	// child run rather than spawning a fresh one.
-	if _, err := runtime.Retry(run.ID, RetryRestart, nil); err != nil {
+	if _, err := runtime.Retry(run.ID, RetryRestart); err != nil {
 		t.Fatalf("retry parent: %v", err)
 	}
 	waitForStatus(t, runtime, run.ID, RunCompleted)
@@ -638,18 +639,18 @@ func TestRuntimeChildFailurePropagatesToParent(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(Manifest{
+	thread, err := runtime.CreateThread(nil)
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
 		Version: ManifestVersion,
 		Brain:   "brain@1",
 		Children: []ChildManifest{{
 			Name: "child", Brain: "brain@1", Capabilities: []CapabilityConfig{},
 			OnFailure: OnFailurePropagate,
 		}},
-	}, nil)
-	if err != nil {
-		t.Fatalf("create thread: %v", err)
-	}
-	run, err := runtime.CreateRun(thread.ID, "parent task", nil)
+	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -758,15 +759,15 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 		}
 	})
 
-	thread, err := runtime.CreateThread(Manifest{
-		Version:      ManifestVersion,
-		Brain:        "brain@1",
-		Capabilities: []CapabilityConfig{{Name: "tool.x"}},
-	}, nil)
+	thread, err := runtime.CreateThread(nil)
 	if err != nil {
 		t.Fatalf("create thread: %v", err)
 	}
-	run, err := runtime.CreateRun(thread.ID, "task", nil)
+	run, err := runtime.CreateRun(thread.ID, "task", Manifest{
+		Version:      ManifestVersion,
+		Brain:        "brain@1",
+		Capabilities: []CapabilityConfig{{Name: "tool.x"}},
+	})
 	if err != nil {
 		t.Fatalf("create run: %v", err)
 	}
@@ -776,7 +777,7 @@ func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	}
 
 	// Hard retry always forks from the beginning (agent.input step, no shared prefix).
-	if _, err := runtime.Retry(run.ID, RetryRestart, nil); err != nil {
+	if _, err := runtime.Retry(run.ID, RetryRestart); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
 	recovered := waitForStatus(t, runtime, run.ID, RunCompleted)
