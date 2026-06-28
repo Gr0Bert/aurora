@@ -272,7 +272,7 @@ func (r *Runtime) SetBrains(ctx context.Context, sources []BrainSource) error {
 	return nil
 }
 
-func (r *Runtime) CreateThread(manifest Manifest) (ThreadSnapshot, error) {
+func (r *Runtime) CreateThread(manifest Manifest, tags map[string]string) (ThreadSnapshot, error) {
 	if strings.TrimSpace(manifest.Brain) == "" {
 		manifest.Brain = r.brains.DefaultID()
 	}
@@ -288,7 +288,7 @@ func (r *Runtime) CreateThread(manifest Manifest) (ThreadSnapshot, error) {
 		return ThreadSnapshot{}, err
 	}
 	now := r.now().UTC()
-	thread := &threadState{id: id, title: "New thread", createdAt: now, updatedAt: now, manifest: manifest}
+	thread := &threadState{id: id, title: "New thread", createdAt: now, updatedAt: now, manifest: manifest, tags: cloneTags(tags)}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()

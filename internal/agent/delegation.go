@@ -96,7 +96,7 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	}
 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
-	thread, err := c.runtime.CreateThread(childManifest)
+	thread, err := c.runtime.CreateThread(childManifest, nil)
 	if err != nil {
 		return dispatcher.Fail(fmt.Sprintf("create child thread: %v", err)), nil
 	}
