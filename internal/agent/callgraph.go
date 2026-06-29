@@ -171,8 +171,24 @@ func (r *Runtime) callGraphLocked(runID string, visited map[string]bool) RunGrap
 		Answer:   run.answer,
 		Error:    run.err,
 	}
+	// Build a brain→name index from the parent manifest for backward-compat
+	// backfill: runs created before Name was tracked in the manifest have an
+	// empty Name on their own manifest but we can infer it from the parent's
+	// ChildManifest list by matching the child's brain.
+	childNameByBrain := make(map[string]string, len(run.manifest.Children))
+	for _, cm := range run.manifest.Children {
+		if cm.Brain != "" && cm.Name != "" {
+			childNameByBrain[cm.Brain] = cm.Name
+		}
+	}
 	for _, childID := range run.childRunIDs {
-		node.Children = append(node.Children, r.callGraphLocked(childID, visited))
+		childNode := r.callGraphLocked(childID, visited)
+		if childNode.Name == "" {
+			if cr := r.runs[childID]; cr != nil {
+				childNode.Name = childNameByBrain[cr.manifest.Brain]
+			}
+		}
+		node.Children = append(node.Children, childNode)
 	}
 	return node
 }
