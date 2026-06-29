@@ -16,6 +16,7 @@ const (
 
 type Manifest struct {
 	Version      int                `json:"version"`
+	Name         string             `json:"name,omitempty"`
 	Brain        string             `json:"brain,omitempty"`
 	BindingRef   string             `json:"binding_ref,omitempty"`
 	SystemPrompt string             `json:"system_prompt,omitempty"`
@@ -88,7 +89,6 @@ func ValidateManifest(manifest Manifest, provider DispatcherProvider) (Manifest,
 	}
 	return cloneManifest(manifest), nil
 }
-
 
 func validateChildren(children []ChildManifest, provider DispatcherProvider) error {
 	seen := make(map[string]struct{}, len(children))

@@ -727,6 +727,179 @@ func (d *failThenSucceedDispatcher) Dispatch(_ context.Context, _ RunContext, ca
 	}
 }
 
+// waitForRunFailed polls until the run reaches RunFailed, fataling if it
+// reaches any other terminal state first.
+func waitForRunFailed(t *testing.T, runtime *Runtime, runID string) RunSnapshot {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		snap, err := runtime.GetRun(runID)
+		if err != nil {
+			t.Fatalf("get run: %v", err)
+		}
+		switch snap.Status {
+		case RunFailed:
+			return snap
+		case RunCompleted, RunStopped:
+			t.Fatalf("run reached %s, expected RunFailed", snap.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("run did not reach RunFailed within timeout")
+	return RunSnapshot{}
+}
+
+// cascadeResumeDispatchers drives a parent that delegates to a child with
+// multiple steps. The child calls tool.x then on its second LLM turn fails on
+// attempt 1 and succeeds on attempt 2. With OnFailurePropagate the parent also
+// fails on attempt 1. On parent resume-retry the cascade must resume (not
+// restart) the child so only entries from the failing step onward get a new
+// revision.
+type cascadeResumeDispatchers struct {
+	mu         sync.Mutex
+	childTurn2 int
+}
+
+func (*cascadeResumeDispatchers) Normalize(_ string, settings json.RawMessage) (json.RawMessage, error) {
+	if len(settings) == 0 {
+		return json.RawMessage(`{}`), nil
+	}
+	return append(json.RawMessage(nil), settings...), nil
+}
+
+func (d *cascadeResumeDispatchers) NewDispatcher(_ context.Context, _ RunContext, _ Manifest) (dispatcher.Dispatcher[RunContext], error) {
+	return &cascadeResumeDispatcherImpl{parent: d}, nil
+}
+
+func (*cascadeResumeDispatchers) IsSubset(_ string, _, _ json.RawMessage) error { return nil }
+
+type cascadeResumeDispatcherImpl struct{ parent *cascadeResumeDispatchers }
+
+func (d *cascadeResumeDispatcherImpl) Capabilities() []dispatcher.Capability {
+	return []dispatcher.Capability{{
+		Name:        "tool.x",
+		Description: "test tool",
+		InputSchema: json.RawMessage(`{"type":"object"}`),
+	}}
+}
+
+func (d *cascadeResumeDispatcherImpl) Dispatch(_ context.Context, _ RunContext, call dispatcher.Call, _ dispatcher.Authorization) (dispatcher.Outcome, error) {
+	switch call.Name {
+	case "tool.x":
+		return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
+	case "openai.chat":
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.Unmarshal(call.Args, &req)
+		isChild, hasTool := false, false
+		for _, m := range req.Messages {
+			if m.Role == "user" && strings.Contains(m.Content, "do subtask") {
+				isChild = true
+			}
+			if m.Role == "tool" {
+				hasTool = true
+			}
+		}
+		if isChild {
+			if !hasTool {
+				// Child first turn: call tool.x
+				return chatActions(`{"actions":[{"action":"tool.x","content":{}}]}`), nil
+			}
+			// Child second turn: fail on first live dispatch, succeed on second.
+			d.parent.mu.Lock()
+			d.parent.childTurn2++
+			n := d.parent.childTurn2
+			d.parent.mu.Unlock()
+			if n == 1 {
+				return chatActions(`{"actions":[{"action":"missing.tool","content":{}}]}`), nil
+			}
+			return chatActions(`{"actions":[{"action":"final","content":{"answer":"child-done"}}]}`), nil
+		}
+		// Parent: delegate on first turn, finish once it has the child's result.
+		if hasTool {
+			return chatActions(`{"actions":[{"action":"final","content":{"answer":"parent-done"}}]}`), nil
+		}
+		return chatActions(`{"actions":[{"action":"call.child","content":{"message":"do subtask"}}]}`), nil
+	default:
+		return dispatcher.Fail("unsupported call: " + call.Name), nil
+	}
+}
+
+func TestRuntimeCascadeResumeUsesResumeModeForFailedChild(t *testing.T) {
+	if _, err := exec.LookPath("tinygo"); err != nil {
+		t.Skip("tinygo not found")
+	}
+	store := newRuntimeStore()
+	runtime, err := NewRuntime(context.Background(), Config{
+		Brains: staticBrains{
+			defaultID: "brain@1",
+			sources:   []BrainSource{{ID: "brain@1", Wasm: buildBrain(t)}},
+		},
+		Dispatchers:  &cascadeResumeDispatchers{},
+		Log:          store.log,
+		Leases:       store,
+		SessionStore: newRuntimeSessions(),
+		TaskSecret:   []byte("stable-secret"),
+		IDSource:     sequentialIDs(),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := runtime.Close(ctx); err != nil {
+			t.Errorf("close runtime: %v", err)
+		}
+	})
+
+	thread, err := runtime.CreateThread(nil)
+	if err != nil {
+		t.Fatalf("create thread: %v", err)
+	}
+	run, err := runtime.CreateRun(thread.ID, "parent task", Manifest{
+		Version: ManifestVersion,
+		Brain:   "brain@1",
+		Children: []ChildManifest{{
+			Name:         "child",
+			Brain:        "brain@1",
+			OnFailure:    OnFailurePropagate,
+			Capabilities: []CapabilityConfig{{Name: "tool.x"}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+
+	// Attempt 1: child fails → parent fails via OnFailurePropagate.
+	waitForRunFailed(t, runtime, run.ID)
+	childID := onlyChildRun(t, runtime, run.ID)
+
+	// Resume parent: the cascade must propagate RetryResume to the child so the
+	// child replays its shared prefix rather than restarting from scratch.
+	if _, err := runtime.Retry(run.ID, RetryResume); err != nil {
+		t.Fatalf("retry parent: %v", err)
+	}
+	completed := waitForStatus(t, runtime, run.ID, RunCompleted)
+	if completed.Answer != "parent-done" {
+		t.Fatalf("parent answer = %q, want parent-done", completed.Answer)
+	}
+
+	// The child's revision-2 entries must begin at a position > 0: the shared
+	// prefix (all steps before the failing call) should carry the old revision.
+	childForkIdx := store.minRev2Index(childID)
+	if childForkIdx < 0 {
+		t.Fatal("child has no revision-2 entries (child was not retried via cascade)")
+	}
+	if childForkIdx == 0 {
+		t.Fatalf("child fork index = 0, want > 0: cascade resume should preserve the child's shared prefix, not restart from scratch")
+	}
+}
+
 func TestRuntimeHardRetryForksFromBeginning(t *testing.T) {
 	if _, err := exec.LookPath("tinygo"); err != nil {
 		t.Skip("tinygo not found")

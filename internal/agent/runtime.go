@@ -437,6 +437,50 @@ func (r *Runtime) Journal(runID string) ([]JournalEntry, error) {
 	return entries, nil
 }
 
+// JournalRevisions returns a per-revision snapshot of the run's journal.
+// For each revision r the snapshot contains, at every position, the entry with
+// the highest revision ≤ r — i.e. the effective state of the run at that point.
+// The entry's Revision field reflects when it was first written, so callers can
+// distinguish steps carried forward from earlier revisions versus steps first
+// executed at revision r (including any that failed in a prior attempt).
+func (r *Runtime) JournalRevisions(runID string) (map[uint64][]JournalEntry, error) {
+	r.mu.Lock()
+	run := r.runs[runID]
+	r.mu.Unlock()
+	if run == nil {
+		return nil, fmt.Errorf("%w: run %s", ErrNotFound, runID)
+	}
+	j, ok := run.journal.(*logJournal)
+	if !ok {
+		return nil, fmt.Errorf("%w: run %s has no readable journal", ErrNotFound, runID)
+	}
+	revs := j.history.allRevisions()
+	positions := j.history.allPositions()
+	result := make(map[uint64][]JournalEntry, len(revs))
+	for _, rev := range revs {
+		entries := make([]JournalEntry, 0, len(positions))
+		for _, pos := range positions {
+			rec, ok := j.history.getAt(pos, rev)
+			if !ok {
+				continue
+			}
+			actualRev, _ := j.history.revAt(pos, rev)
+			entries = append(entries, JournalEntry{
+				Index:    pos,
+				Revision: actualRev,
+				Call:     rec.Call,
+				Outcome: JournalOutcome{
+					Status:  rec.Outcome.Kind(),
+					Result:  rec.Outcome.Result(),
+					Message: rec.Outcome.Message(),
+				},
+			})
+		}
+		result[rev] = entries
+	}
+	return result, nil
+}
+
 func (r *Runtime) Tasks(runID string) ([]TaskSnapshot, error) {
 	r.mu.Lock()
 	run := r.runs[runID]
@@ -586,7 +630,7 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	if mode == RetryRestart {
 		// Hard restart: always fork from the beginning (the agent.input step),
 		// giving the brain a completely fresh revision with no shared prefix.
-		if err := r.forkJournalLocked(run, 0); err != nil {
+		if err := r.forkJournalLocked(run, 0, RetryRestart); err != nil {
 			r.mu.Unlock()
 			return RunSnapshot{}, err
 		}
@@ -609,7 +653,7 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 			if run.status == RunFailed && run.failureOffset > 0 {
 				forkOffset = run.failureOffset - 1
 			}
-			if err := r.forkJournalLocked(run, forkOffset); err != nil {
+			if err := r.forkJournalLocked(run, forkOffset, RetryResume); err != nil {
 				r.mu.Unlock()
 				return RunSnapshot{}, err
 			}
@@ -640,9 +684,10 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	return snapshot, nil
 }
 
-// forkJournalLocked re-forks run's journal at forkOffset and sets cascade/preserveSession.
+// forkJournalLocked re-forks run's journal at forkOffset, records the retry mode
+// for downstream cascade children, and sets cascade/preserveSession.
 // Must be called with the runtime mutex held.
-func (r *Runtime) forkJournalLocked(run *runState, forkOffset int) error {
+func (r *Runtime) forkJournalLocked(run *runState, forkOffset int, mode RetryMode) error {
 	parentJournal, ok := run.journal.(*logJournal)
 	if !ok {
 		return fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
@@ -658,6 +703,7 @@ func (r *Runtime) forkJournalLocked(run *runState, forkOffset int) error {
 	// Children whose spawn call is replayed from the shared prefix are skipped;
 	// the cursor starts at the first child re-executed past the fork offset.
 	run.cascade = true
+	run.cascadeMode = mode
 	run.cascadeCursor = 0
 	for _, off := range run.childSpawnOffsets {
 		if off < forkOffset {

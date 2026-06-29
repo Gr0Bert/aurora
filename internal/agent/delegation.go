@@ -82,8 +82,8 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	// spawning a fresh child each time, reuse the existing child run recorded at
 	// this position (in spawn order) and retry it, which recursively cascades the
 	// restart down its own subtree.
-	if childID, threadID, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
-		if _, err := c.runtime.Retry(childID, RetryRestart); err != nil {
+	if childID, threadID, cascadeMode, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
+		if _, err := c.runtime.Retry(childID, cascadeMode); err != nil {
 			return dispatcher.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
 		answer, err := c.runtime.waitForCompletion(ctx, childID, threadID)
@@ -133,6 +133,7 @@ func buildChildManifest(child ChildManifest, systemPromptOverride string) Manife
 	}
 	return Manifest{
 		Version:      ManifestVersion,
+		Name:         child.Name,
 		Brain:        child.Brain,
 		BindingRef:   child.BindingRef,
 		SystemPrompt: prompt,
@@ -185,10 +186,14 @@ func delegationCapability(name string, child ChildManifest) dispatcher.Capabilit
 }
 
 // nextCascadeChild returns the next existing child run to reuse when a parent run
-// is being restarted with cascade enabled, advancing through the parent's children
+// is being retried with cascade enabled, advancing through the parent's children
 // in spawn order. It returns ok=false once cascade is off or the recorded children
 // are exhausted, in which case the caller spawns a fresh child.
-func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string, ok bool) {
+//
+// The returned cascadeMode is the effective retry mode to use on the child:
+// it mirrors the parent's cascadeMode except that completed children are always
+// restarted (RetryResume is invalid for completed runs).
+func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string, cascadeMode RetryMode, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	parent := r.runs[parentRunID]
@@ -201,7 +206,7 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 				"children", len(parent.childRunIDs),
 			)
 		}
-		return "", "", false
+		return "", "", "", false
 	}
 	childID = parent.childRunIDs[parent.cascadeCursor]
 	parent.cascadeCursor++
@@ -212,9 +217,16 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 			"child_run", childID,
 			"cursor", parent.cascadeCursor-1,
 		)
-		return "", "", false
+		return "", "", "", false
 	}
-	return childID, child.threadID, true
+	// A resume-mode cascade should also resume the child so only the failed step
+	// gets a new revision. Completed children cannot be resumed, so fall back to
+	// restart in that case.
+	mode := parent.cascadeMode
+	if mode == RetryResume && child.status == RunCompleted {
+		mode = RetryRestart
+	}
+	return childID, child.threadID, mode, true
 }
 
 func (r *Runtime) createChildRun(parentRunID string, threadID string, message string, manifest Manifest) (RunSnapshot, error) {

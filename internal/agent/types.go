@@ -1,11 +1,11 @@
 package agent
 
 import (
+	"encoding/json"
+	"errors"
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
-	"encoding/json"
-	"errors"
 	"sync"
 	"time"
 
@@ -102,26 +102,26 @@ type threadState struct {
 }
 
 type runState struct {
-	id                string
-	threadID          string
-	message           string
-	history           []HistoryMessage
-	status            RunStatus
-	attempt           int
-	createdAt         time.Time
-	updatedAt         time.Time
-	startedAt         *time.Time
-	completedAt       *time.Time
-	answer            string
-	err               string
-	journal           journaled.Journal
-	session           *capcompute.Session[RunKey]
-	handle            *capcompute.PlayHandle[RunKey]
-	stopRequested     bool
-	preserveSession   bool
-	manifest          Manifest
-	revision          uint64
-	brainDigest       string
+	id              string
+	threadID        string
+	message         string
+	history         []HistoryMessage
+	status          RunStatus
+	attempt         int
+	createdAt       time.Time
+	updatedAt       time.Time
+	startedAt       *time.Time
+	completedAt     *time.Time
+	answer          string
+	err             string
+	journal         journaled.Journal
+	session         *capcompute.Session[RunKey]
+	handle          *capcompute.PlayHandle[RunKey]
+	stopRequested   bool
+	preserveSession bool
+	manifest        Manifest
+	revision        uint64
+	brainDigest     string
 	// parentRunID and childRunIDs make delegated runs addressable: a child knows
 	// the run that spawned it, and a parent records its children in spawn order.
 	parentRunID string
@@ -137,9 +137,11 @@ type runState struct {
 	failureOffset int
 	// cascade re-execution state: when a run is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
-	// spawn order rather than spawning fresh ones.
+	// spawn order rather than spawning fresh ones. cascadeMode records whether the
+	// parent was resumed or restarted so children inherit the right retry mode.
 	cascade       bool
 	cascadeCursor int
+	cascadeMode   RetryMode
 	// failure forces the run to finish as failed regardless of how its play ends;
 	// set when a delegated child fails under an OnFailurePropagate policy.
 	failure error
@@ -174,21 +176,21 @@ type ThreadSnapshot struct {
 }
 
 type RunSnapshot struct {
-	ID                string     `json:"id"`
-	ThreadID          string     `json:"thread_id"`
-	Message           string     `json:"message"`
-	Status            RunStatus  `json:"status"`
-	Attempt           int        `json:"attempt"`
-	Revision          uint64     `json:"revision"`
-	Answer            string     `json:"answer,omitempty"`
-	Error             string     `json:"error,omitempty"`
-	JournalLength     int        `json:"journal_length"`
-	CreatedAt         time.Time  `json:"created_at"`
-	UpdatedAt         time.Time  `json:"updated_at"`
-	StartedAt         *time.Time `json:"started_at,omitempty"`
-	CompletedAt       *time.Time `json:"completed_at,omitempty"`
-	Manifest          Manifest   `json:"manifest"`
-	BrainDigest       string     `json:"brain_digest"`
+	ID            string     `json:"id"`
+	ThreadID      string     `json:"thread_id"`
+	Message       string     `json:"message"`
+	Status        RunStatus  `json:"status"`
+	Attempt       int        `json:"attempt"`
+	Revision      uint64     `json:"revision"`
+	Answer        string     `json:"answer,omitempty"`
+	Error         string     `json:"error,omitempty"`
+	JournalLength int        `json:"journal_length"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
+	StartedAt     *time.Time `json:"started_at,omitempty"`
+	CompletedAt   *time.Time `json:"completed_at,omitempty"`
+	Manifest      Manifest   `json:"manifest"`
+	BrainDigest   string     `json:"brain_digest"`
 }
 
 type TaskSnapshot struct {

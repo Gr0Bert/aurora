@@ -66,6 +66,36 @@ func (h *runHistory) add(position int, revision uint64, rec journaled.Record) {
 	h.mu.Unlock()
 }
 
+// allRevisions returns all distinct revision numbers in the history, sorted ascending.
+func (h *runHistory) allRevisions() []uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	seen := make(map[uint64]struct{})
+	for _, entries := range h.byPos {
+		for _, e := range entries {
+			seen[e.revision] = struct{}{}
+		}
+	}
+	out := make([]uint64, 0, len(seen))
+	for r := range seen {
+		out = append(out, r)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
+}
+
+// allPositions returns all distinct positions in the history, sorted ascending.
+func (h *runHistory) allPositions() []int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]int, 0, len(h.byPos))
+	for pos := range h.byPos {
+		out = append(out, pos)
+	}
+	sort.Ints(out)
+	return out
+}
+
 // getAt returns a copy of the entry at position with the highest revision ≤ maxRev.
 func (h *runHistory) getAt(position int, maxRev uint64) (journaled.Record, bool) {
 	h.mu.Lock()

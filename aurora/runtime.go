@@ -11,6 +11,7 @@ type Runtime interface {
 	CreateRun(threadID string, message string, manifest Manifest) (RunSnapshot, error)
 	GetRun(runID string) (RunSnapshot, error)
 	Journal(runID string) ([]JournalEntry, error)
+	JournalRevisions(runID string) (map[uint64][]JournalEntry, error)
 	CallGraph(runID string) (RunGraphNode, error)
 	ThreadGraph(threadID string) (ThreadGraph, error)
 	Tasks(runID string) ([]TaskSnapshot, error)

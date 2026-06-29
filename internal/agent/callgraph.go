@@ -132,6 +132,7 @@ func (r *Runtime) ThreadGraph(threadID string) (ThreadGraph, error) {
 // delegated child runs it spawned, in spawn order.
 type RunGraphNode struct {
 	RunID    string         `json:"run_id"`
+	Name     string         `json:"name,omitempty"`
 	ThreadID string         `json:"thread_id"`
 	ParentID string         `json:"parent_id,omitempty"`
 	Status   RunStatus      `json:"status"`
@@ -161,6 +162,7 @@ func (r *Runtime) callGraphLocked(runID string, visited map[string]bool) RunGrap
 	visited[runID] = true
 	node := RunGraphNode{
 		RunID:    run.id,
+		Name:     run.manifest.Name,
 		ThreadID: run.threadID,
 		ParentID: run.parentRunID,
 		Status:   run.status,
