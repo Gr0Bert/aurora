@@ -120,9 +120,9 @@ func validateChildren(children []ChildManifest, provider DispatcherProvider) err
 			if err != nil {
 				return fmt.Errorf("%w: child %q %s settings: %v", ErrInvalid, child.Brain, cap.Name, err)
 			}
-			if settingsRequireApproval(normalized) {
-				return fmt.Errorf("%w: child %q capability %q requires approval; child capabilities cannot require approval — set require_approval: false explicitly", ErrInvalid, child.Name, cap.Name)
-			}
+			// Child capabilities may require approval: a child that yields for a
+			// human decision suspends its parent durably and resumes once resolved
+			// (see the delegation HITL path in delegation.go / execution.go).
 			child.Capabilities[j].Settings = append(json.RawMessage(nil), normalized...)
 		}
 		if err := validateChildren(child.Children, provider); err != nil {

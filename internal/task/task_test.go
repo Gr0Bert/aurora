@@ -1,14 +1,14 @@
 package task_test
 
 import (
-	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"github.com/aurora-capcompute/aurora-capcompute/internal/task"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"sync"
 	"testing"
 	"time"
@@ -133,6 +133,55 @@ func (d *approvalDispatcher) Dispatch(_ context.Context, _ run, _ dispatcher.Cal
 	}
 	d.executions++
 	return dispatcher.Result(json.RawMessage(`{"ok":true}`)), nil
+}
+
+// A delegation call (call.<child>) that yields suspends its parent while the
+// child awaits its own approval. That is not a human-approvable task, so the
+// dispatcher must propagate the yield WITHOUT creating a task record — otherwise
+// the parent gets a phantom barrier task that never resolves.
+func TestDispatcherDoesNotTaskifyDelegationYield(t *testing.T) {
+	store := newTaskStore()
+	journal := &journal{}
+	next := &approvalDispatcher{} // yields when auth is empty
+	scope := task.Scope{TenantID: "tenant", ThreadID: "thread", RunID: "parent", Revision: 1}
+	d := &task.Dispatcher[run]{
+		Next:        next,
+		Store:       store,
+		Journal:     journal,
+		Scope:       func(run) task.Scope { return scope },
+		TokenSecret: []byte("test-secret"),
+		TaskTTL:     time.Hour,
+	}
+
+	call := dispatcher.Call{Name: "call.research", Args: json.RawMessage(`{"message":"go"}`)}
+	outcome, err := d.Dispatch(context.Background(), run{}, call, dispatcher.Authorization{})
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if outcome.Kind() != dispatcher.OutcomeYield {
+		t.Fatalf("outcome = %s, want yield", outcome.Kind())
+	}
+	// The yield is the one propagated from Next, not a task-id yield.
+	if outcome.Message() != "approve test operation" {
+		t.Fatalf("yield message = %q, want the propagated next yield", outcome.Message())
+	}
+	records, err := store.List(context.Background(), scope.TenantID, scope.RunID)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("delegation yield created %d task(s), want 0", len(records))
+	}
+
+	// Sanity: a non-delegation call that yields DOES create a task.
+	plain := dispatcher.Call{Name: "internet.read", Args: json.RawMessage(`{"url":"https://x"}`)}
+	if _, err := d.Dispatch(context.Background(), run{}, plain, dispatcher.Authorization{}); err != nil {
+		t.Fatalf("plain dispatch: %v", err)
+	}
+	records, _ = store.List(context.Background(), scope.TenantID, scope.RunID)
+	if len(records) != 1 {
+		t.Fatalf("non-delegation yield created %d task(s), want 1", len(records))
+	}
 }
 
 func TestDispatcherPersistsAndResumesYieldedTask(t *testing.T) {

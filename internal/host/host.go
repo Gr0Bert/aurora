@@ -53,5 +53,8 @@ func (f Factory[K]) NewDispatcher(ctx context.Context, key K) (dispatcher.Dispat
 		TaskTTL:       f.TaskTTL,
 		OnTaskCreated: f.OnTaskCreated,
 	}
-	return replay.NewDispatcher[K](journaled.NewTape(journal), withTasks), nil
+	// Savepoint markers sit below replay (so they are journaled) and above the
+	// task layer (so they never become durable tasks or hit a base capability).
+	withSavepoints := &savepointDispatcher[K]{next: withTasks}
+	return replay.NewDispatcher[K](journaled.NewTape(journal), withSavepoints), nil
 }

@@ -95,7 +95,7 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 			parentRunID:       sr.ParentRunID,
 			childRunIDs:       append([]string(nil), sr.ChildRunIDs...),
 			childSpawnOffsets: append([]int(nil), sr.ChildSpawnOffsets...),
-			failureOffset:     sr.FailureOffset,
+			forkOffset:        sr.ForkOffset,
 		}
 		if run.revision == 0 {
 			run.revision = 1
@@ -105,16 +105,12 @@ func (r *Runtime) restoreThread(proj Projection, journals map[string]map[uint64]
 		} else {
 			// No entries logged for this revision yet (run crashed before any tool
 			// call). Share the existing history so the replay can serve the shared
-			// prefix; forkOffset is derived from the stored failure offset.
+			// prefix; the exact fork point was persisted when the revision forked.
 			history := histories[run.id]
 			if history == nil {
 				history = newRunHistory()
 			}
-			forkOffset := 0
-			if sr.FailureOffset > 0 {
-				forkOffset = sr.FailureOffset - 1
-			}
-			run.journal, err = r.newJournal(run, history, forkOffset)
+			run.journal, err = r.newJournal(run, history, sr.ForkOffset)
 			if err != nil {
 				return err
 			}

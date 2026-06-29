@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
+	internalhost "github.com/aurora-capcompute/aurora-capcompute/internal/host"
 
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
@@ -168,6 +169,44 @@ func (j *logJournal) Length() int {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	return j.forkOffset + len(j.records)
+}
+
+// outermostOpenTry scans the effective journal for the outermost host.try
+// marker that was never closed by a matching host.commit, treating the markers
+// as balanced brackets. It returns the fork offset (one past that try, so the
+// marker itself is replayed from history and its body re-executes live) and
+// true when such an open try exists. The outermost still-open try is the
+// transaction the brain was inside when it failed; forking there re-runs the
+// whole declared unit. With no open try it returns false and the caller keeps
+// the default (replay everything, including recorded soft failures).
+func (j *logJournal) outermostOpenTry() (int, bool) {
+	n := j.Length()
+	depth := 0
+	start := -1
+	for i := 0; i < n; i++ {
+		rec, err := j.Load(i)
+		if err != nil {
+			return 0, false
+		}
+		switch rec.Call.Name {
+		case internalhost.CapTry:
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case internalhost.CapCommit:
+			if depth > 0 {
+				depth--
+				if depth == 0 {
+					start = -1
+				}
+			}
+		}
+	}
+	if depth > 0 && start >= 0 {
+		return start + 1, true
+	}
+	return 0, false
 }
 
 func (j *logJournal) Load(index int) (journaled.Record, error) {

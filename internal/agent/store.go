@@ -60,10 +60,11 @@ type StoredRun struct {
 	ParentRunID string
 	ChildRunIDs []string
 	// ChildSpawnOffsets records the journal position each child was spawned at,
-	// parallel to ChildRunIDs. FailureOffset is the journal length captured when
-	// the run last failed, used to fork a hard retry just before the failing step.
+	// parallel to ChildRunIDs. ForkOffset is the current revision's copy-on-write
+	// fork point; it is persisted so a revision that was forked but crashed before
+	// logging any entry can be reconstructed on restore.
 	ChildSpawnOffsets []int
-	FailureOffset     int
+	ForkOffset        int
 }
 
 // Leases coordinates exclusive run and task execution across runtime instances.

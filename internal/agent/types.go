@@ -131,10 +131,11 @@ type runState struct {
 	// cascade cursor past children whose spawn call is replayed from the shared
 	// prefix, so only re-executed children are reused.
 	childSpawnOffsets []int
-	// failureOffset is the journal length captured when the run last failed; a hard
-	// retry forks just before it so the failing step re-executes over a shared
-	// copy-on-write prefix rather than re-running from scratch.
-	failureOffset int
+	// forkOffset is the current revision's copy-on-write fork point (positions
+	// [0, forkOffset) are served from the shared history). It is set whenever the
+	// journal is forked and persisted so a revision that was forked but crashed
+	// before logging any entry can be reconstructed on restore.
+	forkOffset int
 	// cascade re-execution state: when a run is restarted, cascade is set so the
 	// delegation router reuses (retries) the existing children at cascadeCursor in
 	// spawn order rather than spawning fresh ones. cascadeMode records whether the
@@ -142,6 +143,12 @@ type runState struct {
 	cascade       bool
 	cascadeCursor int
 	cascadeMode   RetryMode
+	// reconnectChildren makes a resume-from-yield retry take the fork+replay path
+	// (instead of preserving the live session) so the delegation router re-invokes
+	// the un-recorded delegation call and reconnects to the existing child. Set
+	// when a parent suspended on a child's HITL approval is re-driven after that
+	// child finishes; consumed and cleared on the next Retry.
+	reconnectChildren bool
 	// failure forces the run to finish as failed regardless of how its play ends;
 	// set when a delegated child fails under an OnFailurePropagate policy.
 	failure error

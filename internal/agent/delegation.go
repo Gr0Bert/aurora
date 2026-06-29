@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 )
@@ -77,24 +76,37 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 		return dispatcher.Fail(fmt.Sprintf("decode delegation args: %v", err)), nil
 	}
 
-	// Deep cascade resume: when the parent run is being restarted, re-execution
-	// re-issues the same deterministic sequence of delegation calls. Rather than
-	// spawning a fresh child each time, reuse the existing child run recorded at
-	// this position (in spawn order) and retry it, which recursively cascades the
-	// restart down its own subtree.
-	if childID, threadID, cascadeMode, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
+	// Deep cascade resume: when the parent run is being restarted (or re-driven
+	// after a child's HITL approval), re-execution re-issues the same deterministic
+	// sequence of delegation calls. Rather than spawning a fresh child each time,
+	// reuse the existing child run recorded at this position (in spawn order).
+	if childID, threadID, cascadeMode, reuse, ok := c.runtime.nextCascadeChild(parent.RunID); ok {
+		if reuse {
+			// HITL reconnect: the child already finished (e.g. after its approval was
+			// resolved while the parent was suspended). Reuse its terminal result
+			// directly instead of re-running it, which would fork a new revision and
+			// re-create the child's approval task.
+			snap, err := c.runtime.GetRun(childID)
+			if err != nil {
+				return dispatcher.Fail(fmt.Sprintf("reconnect child: %v", err)), nil
+			}
+			answer, _, runErr := childTerminal(snap)
+			if runErr != nil {
+				return c.onChildFailure(parent.RunID, runErr)
+			}
+			return delegationResult(answer)
+		}
 		if _, err := c.runtime.Retry(childID, cascadeMode); err != nil {
 			return dispatcher.Fail(fmt.Sprintf("cascade retry child: %v", err)), nil
 		}
-		answer, err := c.runtime.waitForCompletion(ctx, childID, threadID)
+		answer, parked, err := c.runtime.waitForCompletion(ctx, childID, threadID)
 		if err != nil {
 			return c.onChildFailure(parent.RunID, err)
 		}
-		result, marshalErr := json.Marshal(delegateResult{Answer: answer})
-		if marshalErr != nil {
-			return dispatcher.Outcome{}, marshalErr
+		if parked {
+			return dispatcher.Yield(fmt.Sprintf("waiting on child %s", c.manifest.Name)), nil
 		}
-		return dispatcher.Result(result), nil
+		return delegationResult(answer)
 	}
 
 	childManifest := buildChildManifest(c.manifest, args.SystemPrompt)
@@ -103,13 +115,24 @@ func (c *delegationChild) dispatch(ctx context.Context, parent RunContext, call 
 	if err != nil {
 		return dispatcher.Fail(fmt.Sprintf("create child run: %v", err)), nil
 	}
-	answer, err := c.runtime.waitForCompletion(ctx, run.ID, parent.ThreadID)
+	answer, parked, err := c.runtime.waitForCompletion(ctx, run.ID, parent.ThreadID)
 	if err != nil {
 		return c.onChildFailure(parent.RunID, err)
 	}
-	result, marshalErr := json.Marshal(delegateResult{Answer: answer})
-	if marshalErr != nil {
-		return dispatcher.Outcome{}, marshalErr
+	if parked {
+		// The child parked for human approval. Yield so the parent run suspends
+		// durably; the child→parent finish hook re-drives this call once the child
+		// finishes, and the reconnect branch above returns its answer.
+		return dispatcher.Yield(fmt.Sprintf("waiting on child %s", c.manifest.Name)), nil
+	}
+	return delegationResult(answer)
+}
+
+// delegationResult marshals a child's answer into the delegate result envelope.
+func delegationResult(answer string) (dispatcher.Outcome, error) {
+	result, err := json.Marshal(delegateResult{Answer: answer})
+	if err != nil {
+		return dispatcher.Outcome{}, err
 	}
 	return dispatcher.Result(result), nil
 }
@@ -140,19 +163,6 @@ func buildChildManifest(child ChildManifest, systemPromptOverride string) Manife
 		Capabilities: caps,
 		Children:     children,
 	}
-}
-
-func settingsRequireApproval(settings json.RawMessage) bool {
-	if len(settings) == 0 {
-		return false
-	}
-	var parsed struct {
-		RequireApproval *bool `json:"require_approval"`
-	}
-	if json.Unmarshal(settings, &parsed) != nil {
-		return false
-	}
-	return parsed.RequireApproval != nil && *parsed.RequireApproval
 }
 
 func delegationCapability(name string, child ChildManifest) dispatcher.Capability {
@@ -193,7 +203,7 @@ func delegationCapability(name string, child ChildManifest) dispatcher.Capabilit
 // The returned cascadeMode is the effective retry mode to use on the child:
 // it mirrors the parent's cascadeMode except that completed children are always
 // restarted (RetryResume is invalid for completed runs).
-func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string, cascadeMode RetryMode, ok bool) {
+func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string, cascadeMode RetryMode, reuse, ok bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	parent := r.runs[parentRunID]
@@ -206,7 +216,7 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 				"children", len(parent.childRunIDs),
 			)
 		}
-		return "", "", "", false
+		return "", "", "", false, false
 	}
 	childID = parent.childRunIDs[parent.cascadeCursor]
 	parent.cascadeCursor++
@@ -217,7 +227,13 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 			"child_run", childID,
 			"cursor", parent.cascadeCursor-1,
 		)
-		return "", "", "", false
+		return "", "", "", false, false
+	}
+	// HITL reconnect: a parent re-driven after a child finished its approval reuses
+	// the child's terminal result directly. Re-running it would fork a new revision
+	// and, for a HITL child, re-create the now-resolved approval task.
+	if parent.reconnectChildren && isTerminal(child.status) {
+		return childID, child.threadID, parent.cascadeMode, true, true
 	}
 	// A resume-mode cascade should also resume the child so only the failed step
 	// gets a new revision. Completed children cannot be resumed, so fall back to
@@ -226,7 +242,7 @@ func (r *Runtime) nextCascadeChild(parentRunID string) (childID, threadID string
 	if mode == RetryResume && child.status == RunCompleted {
 		mode = RetryRestart
 	}
-	return childID, child.threadID, mode, true
+	return childID, child.threadID, mode, false, true
 }
 
 func (r *Runtime) createChildRun(parentRunID string, threadID string, message string, manifest Manifest) (RunSnapshot, error) {
@@ -311,34 +327,35 @@ func (r *Runtime) createChildRun(parentRunID string, threadID string, message st
 	return snapshot, nil
 }
 
-func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string) (string, error) {
+// waitForCompletion blocks until the child reaches a terminal state or parks
+// awaiting its own out-of-band approval. parked=true means the caller should
+// yield (suspend the parent durably) rather than treat the result as final;
+// there is deliberately no timeout, since a human approval may take arbitrarily
+// long. ctx cancellation (shutdown/stop) still stops the child.
+func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string) (answer string, parked bool, err error) {
 	_, events, unsubscribe, err := r.Subscribe(threadID)
 	if err != nil {
-		return "", fmt.Errorf("subscribe to child thread: %w", err)
+		return "", false, fmt.Errorf("subscribe to child thread: %w", err)
 	}
 	defer unsubscribe()
 
 	if snapshot, err := r.GetRun(runID); err == nil {
-		if answer, done, runErr := childTerminal(snapshot); done {
-			return answer, runErr
+		if ans, done, runErr := childTerminal(snapshot); done {
+			return ans, false, runErr
+		}
+		if childParked(snapshot) {
+			return "", true, nil
 		}
 	}
-
-	timeout := 5 * time.Minute
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			_, _ = r.Stop(runID)
-			return "", ctx.Err()
-		case <-timer.C:
-			_, _ = r.Stop(runID)
-			return "", fmt.Errorf("child run timed out after %s", timeout)
+			return "", false, ctx.Err()
 		case event, ok := <-events:
 			if !ok {
-				return "", fmt.Errorf("child event stream closed")
+				return "", false, fmt.Errorf("child event stream closed")
 			}
 			if event.Type != "run.updated" {
 				continue
@@ -347,8 +364,11 @@ func (r *Runtime) waitForCompletion(ctx context.Context, runID, threadID string)
 			if !ok || snapshot.ID != runID {
 				continue
 			}
-			if answer, done, runErr := childTerminal(snapshot); done {
-				return answer, runErr
+			if ans, done, runErr := childTerminal(snapshot); done {
+				return ans, false, runErr
+			}
+			if childParked(snapshot) {
+				return "", true, nil
 			}
 		}
 	}
@@ -369,5 +389,43 @@ func childTerminal(snapshot RunSnapshot) (answer string, done bool, err error) {
 		return "", true, fmt.Errorf("child run interrupted")
 	default:
 		return "", false, nil
+	}
+}
+
+// childParked reports whether a child run is durably suspended awaiting out-of-band
+// resolution (its own HITL approval) rather than terminal or still in flight.
+func childParked(s RunSnapshot) bool {
+	return s.Status == RunWaitingTask || s.Status == RunYielded
+}
+
+// resumeParentIfWaiting re-drives a parent that suspended on a delegated child's
+// HITL approval, once that child has reached a terminal state. It is a no-op when
+// the parent is not parked — e.g. a parent still actively blocked in a synchronous
+// delegation call observes the child's completion through its own subscription.
+// The parent is re-driven via fork+replay (reconnectChildren) so the un-recorded
+// delegation call re-executes and reconnects to the finished child.
+func (r *Runtime) resumeParentIfWaiting(parentRunID string) {
+	r.mu.Lock()
+	parent := r.runs[parentRunID]
+	resumable := parent != nil && (parent.status == RunYielded || parent.status == RunWaitingTask)
+	if resumable {
+		parent.reconnectChildren = true
+	}
+	r.mu.Unlock()
+	if !resumable {
+		return
+	}
+	if _, err := r.Retry(parentRunID, RetryResume); err != nil {
+		slog.Warn("resume parent on child completion failed", "parent", parentRunID, "err", err)
+	}
+}
+
+// isTerminal reports whether a run status is a final state (no further execution).
+func isTerminal(status RunStatus) bool {
+	switch status {
+	case RunCompleted, RunFailed, RunStopped, RunInterrupted:
+		return true
+	default:
+		return false
 	}
 }

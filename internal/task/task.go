@@ -10,8 +10,6 @@
 package task
 
 import (
-	"github.com/aurora-capcompute/capcompute/dispatcher"
-	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -19,8 +17,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/aurora-capcompute/capcompute/dispatcher"
+	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
+	"strings"
 	"time"
 )
+
+// delegationCallPrefix marks a call as a delegation to a child run (call.<name>).
+// Such a yield suspends the parent pending the child's own approval and must not
+// be turned into a human-approvable task. Mirrors the prefix used by the agent's
+// delegation router.
+const delegationCallPrefix = "call."
 
 type Scope struct {
 	TenantID string
@@ -45,18 +52,18 @@ const (
 type Resolution = dispatcher.Authorization
 
 type Record struct {
-	Scope           Scope            `json:"scope"`
-	ID              string           `json:"id"`
-	JournalPosition int              `json:"journal_position"`
-	CallHash        string           `json:"call_hash"`
-	Call            dispatcher.Call  `json:"call"`
-	Summary         string           `json:"summary"`
-	State           State            `json:"state"`
-	TokenHash       []byte           `json:"-"`
-	Resolution      Resolution       `json:"resolution,omitempty"`
-	CreatedAt       time.Time        `json:"created_at"`
-	ExpiresAt       *time.Time       `json:"expires_at,omitempty"`
-	ResolvedAt      *time.Time       `json:"resolved_at,omitempty"`
+	Scope           Scope           `json:"scope"`
+	ID              string          `json:"id"`
+	JournalPosition int             `json:"journal_position"`
+	CallHash        string          `json:"call_hash"`
+	Call            dispatcher.Call `json:"call"`
+	Summary         string          `json:"summary"`
+	State           State           `json:"state"`
+	TokenHash       []byte          `json:"-"`
+	Resolution      Resolution      `json:"resolution,omitempty"`
+	CreatedAt       time.Time       `json:"created_at"`
+	ExpiresAt       *time.Time      `json:"expires_at,omitempty"`
+	ResolvedAt      *time.Time      `json:"resolved_at,omitempty"`
 }
 
 type Store interface {
@@ -104,6 +111,13 @@ func (d *Dispatcher[K]) Dispatch(ctx context.Context, key K, call dispatcher.Cal
 	outcome, err := d.Next.Dispatch(ctx, key, call, auth)
 	if err != nil || outcome.Kind() != dispatcher.OutcomeYield {
 		return outcome, err
+	}
+	// A delegation call (call.<child>) yields to suspend its parent while the child
+	// awaits its own out-of-band approval. That is not a human-approvable task —
+	// the parent is re-driven from its journal once the child finishes — so the
+	// yield is propagated transparently, without creating a task record.
+	if strings.HasPrefix(call.Name, delegationCallPrefix) {
+		return outcome, nil
 	}
 	now := d.now()
 	taskID, err := randomID()

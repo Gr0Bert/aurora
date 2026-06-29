@@ -8,10 +8,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
+
 	"github.com/aurora-capcompute/capcompute"
 	"github.com/aurora-capcompute/capcompute/dispatcher"
 	"github.com/aurora-capcompute/capcompute/dispatcher/replay/tape/journaled"
-	"time"
 
 	"github.com/aurora-capcompute/aurora-capcompute/internal/eventlog"
 )
@@ -197,8 +198,17 @@ func (r *Runtime) finish(runID string, status RunStatus, answer string, err erro
 	_ = r.appendRun(run)
 	snapshot := r.runSnapshotLocked(run)
 	threadID := run.threadID
+	parentRunID := run.parentRunID
 	r.mu.Unlock()
 	r.publish(threadID, Event{Type: "run.updated", Data: snapshot})
+
+	// When a delegated child reaches a terminal state, re-drive its parent if the
+	// parent is suspended waiting on it (HITL approval flow). resumeParentIfWaiting
+	// is a no-op for a parent still actively blocked in a synchronous delegation
+	// call, so the existing fast path is unaffected.
+	if parentRunID != "" && isTerminal(status) {
+		r.resumeParentIfWaiting(parentRunID)
+	}
 }
 
 func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, err error) {
@@ -208,15 +218,13 @@ func (r *Runtime) finishLocked(run *runState, status RunStatus, answer string, e
 	run.updatedAt = now
 	run.completedAt = &now
 	run.handle = nil
+	// Consumed by the reconnect re-drive during the play; clear it now the play has
+	// ended so a later unrelated retry isn't treated as a reconnect.
+	run.reconnectChildren = false
 	if err != nil {
 		run.err = err.Error()
 	} else {
 		run.err = ""
-	}
-	if status == RunFailed && run.journal != nil {
-		// Record where the run stopped so a hard retry can fork just before the
-		// failing step instead of re-running from the beginning.
-		run.failureOffset = run.journal.Length()
 	}
 	thread := r.threads[run.threadID]
 	if thread != nil {

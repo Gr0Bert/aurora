@@ -169,7 +169,7 @@ func (r *Runtime) storedRunLocked(run *runState) StoredRun {
 		ParentRunID:       run.parentRunID,
 		ChildRunIDs:       append([]string(nil), run.childRunIDs...),
 		ChildSpawnOffsets: append([]int(nil), run.childSpawnOffsets...),
-		FailureOffset:     run.failureOffset,
+		ForkOffset:        run.forkOffset,
 	}
 }
 

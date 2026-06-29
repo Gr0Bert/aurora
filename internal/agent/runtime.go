@@ -638,20 +638,38 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 		isSessionPreserved := run.status == RunYielded || run.status == RunWaitingTask
 		run.preserveSession = isSessionPreserved
 		if isSessionPreserved {
-			run.cascade = false
+			if run.reconnectChildren {
+				// Resuming a parent suspended on a delegated child's approval. This is
+				// a continuation, not a retry: the delegation call yielded and was
+				// never recorded, so re-executing it appends to the SAME revision
+				// (no fork — forking would gratuitously bump every step from the
+				// delegation call onward). Enable cascade reconnection so that call
+				// reuses the now-finished child instead of spawning a fresh one,
+				// positioning the cursor past children already replayed from the
+				// recorded prefix.
+				run.cascade = true
+				run.cascadeMode = RetryResume
+				run.cascadeCursor = childrenBefore(run.childSpawnOffsets, run.journal.Length())
+			} else {
+				run.cascade = false
+			}
 		} else {
 			j, ok := run.journal.(*logJournal)
 			if !ok {
 				r.mu.Unlock()
 				return RunSnapshot{}, fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
 			}
-			// For a failed run, fork just before the failing step so the brain
-			// re-attempts it live under the bumped revision. For stopped/interrupted
-			// runs there is no specific failure point, so fork at the end of the
-			// journal and let the brain continue from there.
+			// Default: fork at the end of the journal and let the brain continue,
+			// replaying every recorded outcome including soft failures. A failed run
+			// only forks earlier when the brain explicitly left a savepoint open: we
+			// fork right after the outermost still-open host.try so its whole body
+			// re-executes live under the bumped revision. Nothing is inferred from a
+			// bare failing call — soft failures are simply replayed.
 			forkOffset := j.Length()
-			if run.status == RunFailed && run.failureOffset > 0 {
-				forkOffset = run.failureOffset - 1
+			if run.status == RunFailed {
+				if off, ok := j.outermostOpenTry(); ok {
+					forkOffset = off
+				}
 			}
 			if err := r.forkJournalLocked(run, forkOffset, RetryResume); err != nil {
 				r.mu.Unlock()
@@ -664,7 +682,6 @@ func (r *Runtime) Retry(runID string, mode RetryMode) (RunSnapshot, error) {
 	run.answer = ""
 	run.err = ""
 	run.failure = nil
-	run.failureOffset = 0
 	run.stopRequested = false
 	run.startedAt = nil
 	run.completedAt = nil
@@ -693,6 +710,7 @@ func (r *Runtime) forkJournalLocked(run *runState, forkOffset int, mode RetryMod
 		return fmt.Errorf("%w: run %s has no forkable journal", ErrConflict, run.id)
 	}
 	run.revision++
+	run.forkOffset = forkOffset
 	run.journal = newLogJournal(
 		parentJournal.log, parentJournal.scope, parentJournal.run, run.revision,
 		parentJournal.history, forkOffset,
@@ -704,13 +722,21 @@ func (r *Runtime) forkJournalLocked(run *runState, forkOffset int, mode RetryMod
 	// the cursor starts at the first child re-executed past the fork offset.
 	run.cascade = true
 	run.cascadeMode = mode
-	run.cascadeCursor = 0
-	for _, off := range run.childSpawnOffsets {
-		if off < forkOffset {
-			run.cascadeCursor++
+	run.cascadeCursor = childrenBefore(run.childSpawnOffsets, forkOffset)
+	return nil
+}
+
+// childrenBefore counts the children whose spawn call sits before offset in the
+// parent journal. Those are replayed from the shared/recorded prefix, so the
+// cascade cursor starts past them — at the first child re-executed at offset.
+func childrenBefore(spawnOffsets []int, offset int) int {
+	n := 0
+	for _, off := range spawnOffsets {
+		if off < offset {
+			n++
 		}
 	}
-	return nil
+	return n
 }
 
 func (r *Runtime) Subscribe(threadID string) (Event, <-chan Event, func(), error) {
